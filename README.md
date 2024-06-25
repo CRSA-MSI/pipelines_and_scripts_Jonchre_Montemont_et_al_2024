@@ -1,4 +1,4 @@
-#Pipelines and scripts Jonchere Montemont et al
+# Pipelines and scripts Jonchere Montemont et al
 
 This repository comprise two folders containig part of the pipelines and scripts used to do the analysis in the article Massive Early Perturbation of Alternative Splicing Partly Due to Microsatellite Instability at U2AF-Binding Polypyrimidic Tract Sites During Initiation of Colorectal Cancer.
 
