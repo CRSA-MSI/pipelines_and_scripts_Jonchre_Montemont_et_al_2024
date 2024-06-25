@@ -1,0 +1,2323 @@
+---
+title: "Splicing early stage MSI CCR - DELETION ONLY (exclusion of unstable MS with insertion)"
+author: "Hugo Montémont"
+date: "18/12/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+#Introduction
+
+This project is based on the work of Vincent Jonchere about the splicing signature observed in MSI tumors and due to mutations of MS located at jonction intron/exon (I/E). Almost a thousand targets (ES, Exons Skipping) have been identified to have a role in tumorigenesis. We want to know if these MS are already instable in early stage of CCR MSI and if it impact splicing like in tumor.
+
+Two cohorts are studied here : TIMSI (splicoter) by Vincent Jonchère and EarlyMSI (A-BES + Cr-ILES) by Hugo Montémont. To simplified analysis, all data are in hg19 version of genome reference (as in TIMSI). Secondly, ADK in EarlyMSI are removed.
+
+```{r library}
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+library(ggvenn)
+library(dplyr)
+library(ComplexHeatmap)
+library(nlme)
+library(circlize)
+library(ggthemes)
+library(ggridges)
+library(gridtext)
+#library(ggstatsplot)
+#library(palmerpenguins)
+library(rstatix)
+library(ggpubr)
+library(readxl)
+library(plotly)
+library(vioplot)
+library(ComplexUpset)
+library(viridis)
+library(hrbrthemes)
+library(ggVennDiagram)
+library(venneuler)
+library(VennDiagram)
+library(ape)
+library(phangorn)
+library(Biostrings)
+library(ggh4x)
+```
+
+#Data Prep
+
+##TA985
+
+```{r data_preparation}
+TA985 <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/Supplementary_table_S1_edit/TA985.all.MS.txt",header = T,sep = "\t",stringsAsFactors = F)
+
+TA985 <- TA985[,c(1,7:9,30:35)]
+
+colnames(TA985) <- c("exon.id","mutation","exon.type","gene","MS.id","MS.short","MS.base","MS.repeat.length","MS.orientation","MS.distance")
+
+# calculating stop id with start id and repeat length & formating global id (start-stop) for conversion
+# TA985$MS.start <- unlist(lapply(strsplit(TA985$MS.id,"[.]"), `[[`, 3))
+# 
+# TA985$MS.start <- as.numeric(TA985$MS.start)
+# TA985$MS.repeat.length <- as.numeric(TA985$MS.repeat.length)
+# 
+# TA985$MS.stop <- TA985$MS.start + (TA985$MS.repeat.length-1)
+
+# standardization of MS.id nomenclature
+TA985$MS.id <- paste(paste0("chr",unlist(lapply(strsplit(TA985$MS.id,"[.]"), `[[`, 2))),
+                     unlist(lapply(strsplit(TA985$MS.id,"[.]"), `[[`, 3)),sep = ".")
+
+# CORRECTION to mutation.type (inframe/frameshift) variable
+TA985$mutation <- gsub("Inframe","frmsht",TA985$mutation)
+TA985$mutation <- gsub("frameshift","inframe",TA985$mutation)
+TA985$mutation <- gsub("frmsht","frameshift",TA985$mutation)
+```
+
+##ES96
+
+```{r data_preparation}
+ES96 <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/ES96/96.2020.CIS.ELEMENT.txt",header = T,sep = "\t",stringsAsFactors = F)
+# standardization of id.MS nomenclature
+ES96$id.MS <- paste(paste0("chr",unlist(lapply(strsplit(ES96$id.MS,"[.]"), `[[`, 2))),
+                    unlist(lapply(strsplit(ES96$id.MS,"[.]"), `[[`, 3)),sep = ".")
+
+ES96 <- ES96[,c(1,7)]
+ES96 <- merge(x = ES96,y = TA985,by.x = "id.MS",by.y = "MS.id")
+ES96 <- ES96[,-c(3)]
+colnames(ES96)[c(1:4)] <- c("MS.id","exon.id","mutation.type","exon.type")
+# add NeoAg variable
+ES96.frm <- ES96[which(ES96$mutation.type == "frameshift"),"MS.id"]
+ES96.cst <- ES96[which(ES96$exon.type == "constitutive"),"MS.id"]
+ES96.NeoAg <- intersect(ES96.frm,ES96.cst)
+# rm(ES96.frm,ES96.cst)
+ES96$NeoAg <- "No"
+ES96[which(ES96$MS.id %in% ES96.NeoAg),"NeoAg"] <- "Yes"
+```
+
+##DD134
+
+```{r data_preparation}
+# DD134 = DeDifferenciation signature (134 genes)
+DD134 <- read_excel("~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/Supp_tables/Supplementary.table.S2.xlsx",sheet = "Genes",col_names = T)
+```
+
+##MSppt
+
+List of intronic's MS present in accepting site, more specifically in the polypyrimidine tract (= ppt), cf from the position -50 to 0).
+
+```{r data_preparation}
+MS_intronic <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/2.humanV3.intronic.txt",header = F,sep = "\t",stringsAsFactors = F)
+
+colnames(MS_intronic) <- c("id","start","stop","nucleotide","repeat.length","flanking5p",
+                           "flanking3","region","refseq","ensembl","strand","gene.name",
+                           "exons.total","exon.5p","position.exon.5p","exon.3p",
+                           "position.exon.3p")
+MS_intronic$position.exon.5p <- as.numeric(MS_intronic$position.exon.5p)
+MS_intronic$position.exon.3p <- as.numeric(MS_intronic$position.exon.3p)
+
+# selection of MS in flanking sequence of exons 
+MS_intronic <- MS_intronic[which(MS_intronic$position.exon.5p <= 50 | MS_intronic$position.exon.3p >= -50),]
+# add "type" variable to describe if a MS is in a donor or an acceptor site
+MS_intronic$type <- "none"
+MS_intronic[which(MS_intronic$position.exon.5p > 50 & MS_intronic$position.exon.3p >= -50),"type"] <- "acceptor"
+MS_intronic[which(MS_intronic$position.exon.3p < -50 & MS_intronic$position.exon.5p <= 50),"type"] <- "donor"
+# MS_intronic[which(MS_intronic$position.exon.5p <= 50 & MS_intronic$position.exon.3p >= -50),"type"] <- "acceptor.donor"
+## remove unknown case
+MS_intronic <- MS_intronic[-which(MS_intronic$type == "none"),]
+MS_intronic <- MS_intronic[,c(1,18,17)] #289763
+
+# # selection of MS in donor/acceptor sites
+# MS_intronic <- MS_intronic[which(MS_intronic$type %in% c("acceptor","donor")),]
+MS_intronic$id <- paste0("chr",MS_intronic$id)
+## remove duplicates
+MS_intronic <- unique(MS_intronic) #184419
+
+# only MS in the PY
+MS_intronic_3FMS <- MS_intronic[which(MS_intronic$position.exon.3p >= -50),] #103385
+colnames(MS_intronic_3FMS)[c(1,3)] <- c("MS.id","MS.distance")
+
+MS_intronic <- MS_intronic[,c(1,2)]
+MS_intronic <- unique(MS_intronic) #181226
+```
+
+##Listing
+
+We create a unique list (large list, 67 elements, .res) for EarlyMSI & TIMSI samples => SpliMSI series (spli) : n= 7 CRY ; n= 5 LGD ; n= 9 HGD ; n=46 ADK.
+
+SPLI_EARLYMSI
+
+```{r SPLI.EARLYMSI_listing}
+# spli.early.MS = chain of character of SpliMSI series MS tables (.res)
+spli.early.MS <- list.files(path = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/6b_EARLYMSI_annotated_hg19(.res)/",pattern = "*.tsv")
+# spli_early_MS = large list of SpliMSI series MS tables (.res) (22 elements)
+spli_early_MS <- lapply(paste0("~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/6b_EARLYMSI_annotated_hg19(.res)/",spli.early.MS),function(i){read.delim(i,header = T,sep = "\t",stringsAsFactors = F)})
+# rename elements of the list
+list_names_spli.early <- gsub("_trim_sorted_annotated_hg19.tsv","",spli.early.MS)
+
+# rename LGD = AD1, HGD = AD2
+list_names_spli.early <-
+  gsub("C1506116_LS06_HGD_MSI","C1506116_LS06_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1620718_LS14_LGD_MSI","C1620718_LS14_AD1_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1704084_LS04b_LGD_MSI","C1704084_LS04b_AD1_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1706869_LS03_HGD_MSI","C1706869_LS03_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1713455_SP03_HGD_MSI","C1713455_SP03_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1718806_SP02_HGD_MSI","C1718806_SP02_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1720414_LS13_HGD_MSI","C1720414_LS13_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1826369_SP01a_HGD_MSI","C1826369_SP01a_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1911187i_LS08a_HGD_MSI","C1911187i_LS08a_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1911187i_LS08a_LGD_MSI","C1911187i_LS08a_AD1_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1911187k_LS08b_HGD_MSI","C1911187k_LS08b_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C1911187k_LS08b_LGD_MSI","C1911187k_LS08b_AD1_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C2005175_LS12_HGD_MSI","C2005175_LS12_AD2_MSI",list_names_spli.early)
+list_names_spli.early <-
+  gsub("C2008812_LS11_LGD_MSI","C2008812_LS11_AD1_MSI",list_names_spli.early)
+
+names(spli_early_MS) <- list_names_spli.early
+```
+
+SPLI_TIMSI
+
+```{r SPLI.TIMSI_listing}
+# spli.TIMSI.MS = chain of character of SpliMSI series MS tables (.res)
+spli.TIMSI.MS <- list.files(path = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/6a_TIMSI_annotated_hg19(.res)/",pattern = "*.tsv")
+# spli_MS = large list of SpliMSI series MS tables (.res) (46 elements)
+spli_TIMSI_MS <- lapply(paste0("~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/6a_TIMSI_annotated_hg19(.res)/",spli.TIMSI.MS),function(i){read.delim(i,header = F,sep = "\t",stringsAsFactors = F)})
+# rename elements of the list
+list_names_spli_TIMSI <- gsub("_annotated_hg19.tsv|Sample_","",spli.TIMSI.MS)
+names(spli_TIMSI_MS) <- list_names_spli_TIMSI
+
+colnames_spli_TIMSI <- colnames(spli_early_MS$C1506116_LS06_CRY_MSI)
+spli_TIMSI_MS <- lapply(spli_TIMSI_MS,FUN = function(coln.spli.TIMSI.MS){
+  colnames(coln.spli.TIMSI.MS) <- colnames_spli_TIMSI
+  return(coln.spli.TIMSI.MS)})
+```
+
+SPLIMSI
+
+```{r SPLI_listing}
+spli_MS <- c(spli_early_MS,spli_TIMSI_MS)
+
+# MSISensor correction : exclusion of few MS with probably PCR bias (difference between standard ref genome MS length and observed MS length, as aberrant polymorphic MS) 
+# spli_MS <- lapply(spli_MS,FUN = function(spli.MS){
+#   spli.MS.corr <- spli.MS[which(spli.MS$length == spli.MS$min),]
+#   return(spli.MS.corr)})
+
+for(i in seq(1,nrow(spli_MS$C1704084_LS04b_CRY_MSI))) {
+  if(spli_MS$C1704084_LS04b_CRY_MSI[i,"length"] < 10 
+     & spli_MS$C1704084_LS04b_CRY_MSI[i,"length"] !=
+     spli_MS$C1704084_LS04b_CRY_MSI[i,"min"]){
+    spli_MS$C1704084_LS04b_CRY_MSI[i,"del_ins_size"] <- NA
+  }
+}
+
+for(i in seq(1,nrow(spli_MS$C1704084_LS04b_AD1_MSI))) {
+  if(spli_MS$C1704084_LS04b_AD1_MSI[i,"length"] < 7
+     & spli_MS$C1704084_LS04b_AD1_MSI[i,"length"] !=
+     spli_MS$C1704084_LS04b_AD1_MSI[i,"min"]){
+    spli_MS$C1704084_LS04b_AD1_MSI[i,"del_ins_size"] <- NA
+  }
+}
+
+# rm(spli_early_MS,spli_TIMSI_MS)
+```
+
+##MS Covered
+
+To compare samples with each others, it is preferred to have the same MS covered for all. Therefore, we filter dataframe with id's intersection of the 68 samples.
+
+```{r MS_covered_function}
+# First, we apply a filter of coverage
+# MS.covered.fun = function to select only MS covered in all samples (10 reads minimum) 
+# x = .res data frame (all MS)
+MS.covered.fun = function(MS.res) {
+  MS.res <- MS.res[which(MS.res$sum_Tum > 10 & MS.res$sum_Nor > 10),]
+  return(MS.res$id) # output = list of vector (id)
+}
+```
+
+```{r SPLIMSI_MS_covered_all}
+# spli_MS_c10f = list id vector's for all samples which there is at least 10 reads covered
+spli_MS_c10f <- lapply(spli_MS,FUN = MS.covered.fun)
+# intersection of all MS covered (10 reads) in all samples
+spli.MS.covered.all <- Reduce(intersect,spli_MS_c10f) #108416
+
+# Then, we filter dataframes with id intersection's
+# It is a function with two parameters : x = MS.res & y = MS.filter.covered
+# The function is directly implement in lapply()
+spli_MS_covered <- lapply(spli_MS,FUN = function(MS.res,MS.filter.covered){
+  MS.res[which(MS.res$id %in% MS.filter.covered),]
+  },
+  MS.filter.covered = spli.MS.covered.all) # define second argument (y)
+```
+
+##BED Length
+
+```{r SPLIMSI_BED_MS_by_length}
+# only MS covered in all samples
+BED_spli <- spli_MS_covered$C1506116_LS06_CRY_MSI[,c(1,5,23,24)] #108416
+BED_spli$Func.refGene <- gsub("UTR[3,5]|UTR5;UTR3","UTR",BED_spli$Func.refGene)
+BED_spli$Func.refGene <- gsub("exonic;splicing","splicing",BED_spli$Func.refGene)
+BED_spli$Func.refGene <- gsub("upstream;downstream|upstream|downstream","intergenic",
+                              BED_spli$Func.refGene)
+BED_spli$Func.refGene <- gsub("ncRNA_exonic|ncRNA_intronic|ncRNA_splicing","ncRNA",
+                              BED_spli$Func.refGene)
+# exclusion of intergenic & ncRNA MS
+BED_spli <- BED_spli[which(BED_spli$Func.refGene
+                           %in% c("exonic","intronic","UTR","splicing")),] #107266
+
+BED_spli$region.category <- BED_spli$Func.refGene
+BED_spli$region.category <- gsub("intronic|UTR|splicing","non-coding",
+                                 BED_spli$region.category)
+BED_spli$region.category <- gsub("exonic","coding",BED_spli$region.category)
+
+## BED by length 
+BED_spli_length <- as.data.frame(table(BED_spli$length))
+colnames(BED_spli_length) <- c("length","MS.n")
+
+## BED by length & region.category
+BED_spli_length_CNC <- as.data.frame(table(BED_spli$length,BED_spli$region.category))
+colnames(BED_spli_length_CNC) <- c("length","region.category","MS.n")
+BED_spli_length_CNC$length.RG <- paste(BED_spli_length_CNC$length,
+                                       BED_spli_length_CNC$region.category,
+                                       sep = ".")
+
+# filter to keep coding MS with 5-11 pb length & all (size) non-coding MS
+BED_spli_length_CNC[BED_spli_length_CNC$region.category %in% "coding" & as.numeric(as.character(BED_spli_length_CNC$length)) > 11 | BED_spli_length_CNC$region.category %in% "non-coding" & as.numeric(as.character(BED_spli_length_CNC$length)) > 20,"MS.n"] <- NA
+
+BED_spli_length_CNC$length = NULL
+BED_spli_length_CNC$region.category = NULL
+# sum(BED_spli_length_CNC[BED_spli_length_CNC$region.category == "coding",]$MS.n,na.rm = T)
+# sum(BED_spli_length_CNC[BED_spli_length_CNC$region.category == "non-coding",]$MS.n)
+# coding = 74891 MS ; non-coding = 32375 MS
+```
+
+##MSI.FUN
+
+//!// For this project, insertion instability is exclude of the analysis //!//
+
+```{r SPLIMSI_function}
+# MSIdels.fun = function to select unstable (only deletions) MS from .res data frame 
+# x = .res data frame (all MS)
+MSIdels.fun = function(MS.res) {
+  MS.res <- MS.res[which(MS.res$del_ins_size != "NA"),]
+  MS.res <- MS.res[which(MS.res$del_ins_size < 1),] # exclusion of insertion
+  MS.res <- MS.res[,c(1,4,5,22:24)]
+  # rename column
+  colnames(MS.res) <- c("MS.id","nucleotide","length","indels.size","gene.region","gene")
+  # coverage filtering > 10 is already done (chapter "MS_covered")
+  return(MS.res)
+}
+
+# input => SPLIMSI covered
+spli_MSIdels <- lapply(spli_MS_covered,FUN = MSIdels.fun)
+
+# write.table (loop)
+for(i in seq(1,length(spli_MSIdels))) {
+  basename = names(spli_MSIdels)[i]
+  write.table(spli_MSIdels[[i]],file = paste(basename,"MSI.dels.tsv",sep = "_"),
+              sep = "\t",row.names = F, col.names = T)
+}
+```
+
+##ID.1.FUN
+
+```{r start_position_MS_+1(id.1)_function}
+# There is a shift of 1 (-1) base between id position's in the table and id position's in the genome Data Viewer.
+# MSI.id.1.fun = this function correct the shift by adding +1 to the MS starting position ; new column = id.1
+# x = .res data frame (only unstable MS)
+MSI.id.1.fun = function(MSI.res) {
+  MSI.res$MS.start <- unlist(lapply(strsplit(MSI.res$MS.id,"[.]"),`[[`, 2))
+  MSI.res$MS.start <- as.numeric(MSI.res$MS.start)
+  MSI.res$MS.start.1 <- MSI.res$MS.start + 1
+  MSI.res$MS.id.1 <- paste(unlist(lapply(strsplit(MSI.res$MS.id,"[.]"),`[[`,1)),
+                           MSI.res$MS.start.1,sep = ".")
+  return(MSI.res)
+}
+
+## input => spli_MSIdels
+spli_MSIdels <- lapply(spli_MSIdels,FUN = MSI.id.1.fun)
+```
+
+##MSppt.FUN
+
+```{r coding/non-coding_function}
+# MSppt.fun = function to add "splicing.site" variable
+# x = .res data frame (only unstable MS)
+MSppt.fun = function(MSI.res){
+  MSI.res <- merge(x = MSI.res,y = MS_intronic,by.x = "MS.id.1",by.y = "id",all.x = T)
+  return(MSI.res)
+}
+
+## input => spli_MSIdels
+spli_MSIdels <- lapply(spli_MSIdels,FUN = MSppt.fun)
+```
+
+##GR.FUN
+(region.category)
+
+```{r coding/non-coding_function}
+gene_region <- data.frame(region.category = c("coding",rep("non-coding",3)),
+                          gene.region = c("exonic","intronic","UTR","splicing"))
+# GR.fun = function to (i) rename some values from gene.region variable ; (ii) filter specific value from gene.region variable. 
+# x = .res data frame (only unstable MS)
+GR.fun = function(MSI.res) {
+  MSI.res$gene.region <- gsub("UTR[3,5]|UTR5;UTR3","UTR",MSI.res$gene.region)
+  MSI.res$gene.region <- gsub("exonic;splicing","splicing",MSI.res$gene.region)
+  MSI.res <- MSI.res[which(MSI.res$gene.region 
+                           %in% c("exonic","intronic","UTR","splicing")),]
+  MSI.res <- merge(MSI.res,gene_region,by = "gene.region")
+  # exclusion of "new" MS from hg38 genome version
+  MSI.res[MSI.res$region.category == "non-coding" & is.na(MSI.res$splicing.site),] <- NA
+  return(MSI.res[,c(2,3,8,9,7,11,1,10,4:6)])
+}
+
+## input => spli_MSIdels
+spli_MSIdels <- lapply(spli_MSIdels,FUN = GR.fun)
+```
+
+##COND.LOOP
+
+We add two columns conditionally : condition & headcount of samples.
+
+```{r SPLI_conditional_loop_condition}
+# N = headcount by condition 
+# input => MS covered in all samples
+for(i in seq(1,length(spli_MSIdels))) { 
+  if(grepl("T",names(spli_MSIdels[i]))){
+    spli_MSIdels[[i]]$condition <- "ADK"
+    spli_MSIdels[[i]]$N <- 46
+  } else if(grepl("AD1|AD2",names(spli_MSIdels[i]))){
+    spli_MSIdels[[i]]$condition <- "AD"
+    spli_MSIdels[[i]]$N <- 14
+  } else if(grepl("CRY",names(spli_MSIdels[i]))){
+    spli_MSIdels[[i]]$condition <- "CRY"
+    spli_MSIdels[[i]]$N <- 8
+  }
+}
+```
+
+##DF condition
+
+To simplify analysis we group elements of the list by condition & then all together.
+
+```{r SPLI_MSIdels_df_condition}
+## input => MS covered in all samples
+spli_all <- do.call(rbind,spli_MSIdels)
+
+spli_all$patient <- row.names(spli_all)
+rownames(spli_all) <- NULL
+spli_all$patient <- gsub("*T.[0-9]{1,4}","",spli_all$patient)
+spli_all$patient <- gsub("TMSI505.[0-9]{1,4}","TMSI505",spli_all$patient)
+spli_all$patient <- gsub("TMSI564.[0-9]{1,4}","TMSI564",spli_all$patient)
+spli_all$patient <- gsub("TMSI570.[0-9]{1,4}","TMSI570",spli_all$patient)
+spli_all$patient <- gsub("TMSI577.[0-9]{1,4}","TMSI577",spli_all$patient)
+spli_all$patient <- 
+  gsub("_((LS|SP)[0-9]{2}|(LS|SP)[0-9]{2}(a|b))_(AD1|AD2|CRY)_(MSI|MSS).[0-9]{1,4}",
+       "",spli_all$patient)
+
+spli_all$samples <- paste(spli_all$patient,spli_all$condition,sep = "_")
+```
+
+##Metadata
+
+```{r metadatas}
+# data frame to specify headcount by condition (& more if it is necessary)
+metadata_spli <- data.frame(condition = c("ADK","AD","CRY"),N = c(46,14,8))
+```
+
+#General Anlysis
+
+##MSICare
+
+```{r SPLI_boxplot_MSICare}
+spli_MSICare <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/MSICare.all/EarlyMSI_TIMSI_splicoter_MSICareScore_modified.txt",sep=",")
+# regroup LGD/HGD in one condition (AD = adenoma)
+spli_MSICare$condition <- gsub("LGD|HGD","AD",spli_MSICare$condition)
+# order by condition
+spli_MSICare$condition <- factor(spli_MSICare$condition,levels = c("CRY","AD","ADK"))
+
+ggplot(spli_MSICare,aes(x = condition,y = pourcentage,fill = condition)) +
+  geom_boxplot(outlier.shape = NA) + 
+  scale_fill_manual(values = c(CRY = "#e28b00ff",AD = "#796503ff",ADK = "#962d00ff")) +
+  scale_x_discrete(limits = c("CRY","AD","ADK")) +
+  scale_y_continuous(limits = c(0,100),n.breaks = 6) +
+  geom_jitter(color = "black",size = 1.5,alpha = 0.9) +
+  theme_classic() +
+  theme(axis.text.x = element_blank())
+```
+
+##MSI Length
+
+```{r SPLI_barplot_MSI_by_length}
+# n = all MS unstable by length & by condition (with redundancy)
+spli_length <- as.data.frame(table(spli_all$length,
+                                   spli_all$condition))
+colnames(spli_length) <- c("length","condition","n")
+spli_length <- merge(spli_length,metadata_spli,by = "condition")
+spli_length <- merge(spli_length,BED_spli_length,by = "length")
+# mean.length = mean of MS unstable by length & condition (MMRdC,Adenoma,ADK)
+spli_length$mean.length <- spli_length$n/spli_length$N
+# freq.length = frequencies of mean unstable MS's by length & condition
+spli_length$freq.length <- spli_length$mean.length/spli_length$MS.n
+
+# order dataframe
+spli_length <- spli_length[order(spli_length$length),]
+spli_length$length <- factor(as.character(spli_length$length),
+                             levels = unique(as.character(spli_length$length)))
+spli_length$condition <- factor(spli_length$condition,
+                                levels = c("CRY","AD","ADK"))
+
+## y = mean.count
+ggplot(spli_length,aes(x = length,y = mean.length,fill = condition)) +
+  geom_bar(position = "dodge",stat = "identity") +
+  facet_grid(~ factor(condition,
+                      levels = c("CRY","AD","ADK"))) + # plot on the same axis
+  scale_x_discrete(limits = c("5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20")) +
+  scale_fill_manual(values = c(CRY = "#66a6b4ff",AD = "#e28b00ff",ADK = "#962d00f4")) +
+  theme_classic()
+
+## y = frequencies
+ggplot(spli_length,aes(x = length,y = freq.length,fill = condition)) +
+  geom_bar(position = "dodge",stat = "identity") +
+  facet_grid(~ factor(condition,
+                      levels = c("CRY","AD","ADK"))) + # plot on the same axis
+  scale_x_discrete(limits = c("5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20")) +
+  scale_y_continuous(limits = c(0,1)) +
+  scale_fill_manual(values = c(CRY = "#66a6b4ff",AD = "#e28b00ff",ADK = "#962d00f4")) +
+  theme_classic()
+```
+
+##MSppt-CNC
+
+###barplot
+
+####individual
+(only for CRY)
+
+```{r SPLI_barplot_CRY_MSI_CNC_length}
+spli_MSIdels_CRY <- spli_MSIdels[grepl("CRY",names(spli_MSIdels))]
+spli_all_CRY <- do.call(rbind,spli_MSIdels_CRY)
+
+spli_all_CRY$patient <- row.names(spli_all_CRY)
+row.names(spli_all_CRY) <- NULL
+spli_all_CRY$patient <- gsub("_CRY_(MSI|MSS).[0-9]{1,4}","",spli_all_CRY$patient)
+```
+
+```{r SPLI_barplot_CRY_MSI_CNC_length}
+# create dataframe with all MS unstable by region (coding/non-coding), by length & by condition
+spli_length_CNC_CRY <- as.data.frame(table(spli_all_CRY$length,
+                                           spli_all_CRY$region.category,
+                                           spli_all_CRY$patient))
+colnames(spli_length_CNC_CRY) <- c("length","region.category","patient","n")
+
+spli_length_CNC_CRY$length.RG <- paste(spli_length_CNC_CRY$length,
+                                       spli_length_CNC_CRY$region.category,
+                                       sep = ".")
+# filter to keep coding MS with 5-11 pb length & all (size) non-coding MS
+spli_length_CNC_CRY[spli_length_CNC_CRY$region.category %in% "coding" & as.numeric(as.character(spli_length_CNC_CRY$length)) > 11 | spli_length_CNC_CRY$region.category %in% "non-coding" & as.numeric(as.character(spli_length_CNC_CRY$length))>20,"n"] <- NA
+
+# order dataframe
+spli_length_CNC_CRY <- spli_length_CNC_CRY[order(spli_length_CNC_CRY$length),]
+spli_length_CNC_CRY$length <- 
+  factor(as.character(spli_length_CNC_CRY$length),
+         levels = unique(as.character(spli_length_CNC_CRY$length)))
+```
+
+```{r SPLI_barplot_CRY_MSI_CNC_MSppt_length_plot}
+## y = mean.count
+ggplot(spli_length_CNC_CRY,aes(x = length,y = n,fill = region.category)) +
+  geom_bar(position = "dodge",stat = "identity") +
+  facet_grid(~patient) + # plot on the same axis
+  scale_x_discrete(limits = c("5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20")) +
+  scale_fill_manual(values = c("coding" = "#2b8cbeff","non-coding" = "#e6550dff")) +
+  theme_classic()
+```
+
+####condition
+
+######all
+
+```{r SPLI_barplot_MSI_CNC_length}
+# create dataframe with all MS unstable by region (coding/non-coding), by length & by condition
+spli_length_CNC <- as.data.frame(table(spli_all$length,
+                                       spli_all$region.category,
+                                       spli_all$condition))
+colnames(spli_length_CNC) <- c("length","region.category","condition","n")
+spli_length_CNC <- merge(spli_length_CNC,metadata_spli,by = "condition")
+
+spli_length_CNC$length.RG <- paste(spli_length_CNC$length,
+                                   spli_length_CNC$region.category,
+                                   sep = ".")
+# filter to keep coding MS with 5-11 pb length & all (size) non-coding MS
+spli_length_CNC[spli_length_CNC$region.category %in% "coding" & as.numeric(as.character(spli_length_CNC$length)) > 11 | spli_length_CNC$region.category %in% "non-coding" & as.numeric(as.character(spli_length_CNC$length))>20,"n"] <- NA
+# merge with BED_cov
+spli_length_CNC <- merge(spli_length_CNC,BED_spli_length_CNC,by = "length.RG")
+# mean.length = mean of MS unstable by length & condition
+spli_length_CNC$mean.length <- spli_length_CNC$n/spli_length_CNC$N
+# freq.length = frequencies of mean unstable MS's by length & condition
+spli_length_CNC$freq.length <- spli_length_CNC$mean.length/spli_length_CNC$MS.n
+
+# order dataframe
+spli_length_CNC <- spli_length_CNC[order(spli_length_CNC$length),]
+spli_length_CNC$length <- factor(as.character(spli_length_CNC$length),
+                                 levels = unique(as.character(spli_length_CNC$length)))
+```
+
+```{r SPLI_barplot_MSI_CNC_length_plot}
+## y = mean.count
+ggplot(spli_length_CNC,aes(x = length,y = mean.length,fill = region.category)) +
+  geom_bar(position = "dodge",stat = "identity") +
+  facet_grid(~ factor(condition,
+                      levels = c("CRY","AD","ADK"))) + # plot on the same axis
+  scale_x_discrete(limits = c("5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20")) +
+  scale_fill_manual(values = c("coding" = "#2b8cbeff","non-coding" = "#e6550dff")) +
+  # scale_y_continuous(limits = c(0,80),n.breaks = 5) +
+  theme_classic()
+```
+
+#####CRY mop (mono/oligo/poly)
+
+```{r SPLI_barplot_CRY_mop_MSI_CNC_length_data_preparation}
+# m = mono
+spli_MSIdels_CRY_m <- spli_MSIdels_CRY[grepl("LS04a",names(spli_MSIdels_CRY))]
+spli_all_CRY_m <- do.call(rbind,spli_MSIdels_CRY_m)
+spli_all_CRY_m$condition <- paste(spli_all_CRY_m$condition,"mono",sep = "_")
+spli_all_CRY_m$N <- 1
+# o = oligo
+spli_MSIdels_CRY_o <- 
+  spli_MSIdels_CRY[grepl("LS02|LS04b|LS06|LS08a",names(spli_MSIdels_CRY))]
+spli_all_CRY_o <- do.call(rbind,spli_MSIdels_CRY_o)
+spli_all_CRY_o$condition <- paste(spli_all_CRY_o$condition,"oligo",sep = "_")
+spli_all_CRY_o$N <- 4
+# p = poly
+spli_MSIdels_CRY_p <- 
+  spli_MSIdels_CRY[grepl("LS03|LS07|LS08b",names(spli_MSIdels_CRY))]
+spli_all_CRY_p <- do.call(rbind,spli_MSIdels_CRY_p)
+spli_all_CRY_p$condition <- paste(spli_all_CRY_p$condition,"poly",sep = "_")
+spli_all_CRY_p$N <- 3
+# mop = mono/oligo/poly
+spli_all_CRY_mop <- rbind(spli_all_CRY_m,spli_all_CRY_o,spli_all_CRY_p)
+
+spli_all_CRY_mop$patient <- row.names(spli_all_CRY_mop)
+row.names(spli_all_CRY_mop) <- NULL
+spli_all_CRY_mop$patient <- gsub("_CRY_(MSI|MSS).[0-9]{1,4}","",spli_all_CRY_mop$patient)
+```
+
+```{r SPLI_barplot_CRY_mono_oligo_poly_MSI_CNC_length}
+# create dataframe with all MS unstable by region (coding/non-coding), by length & by condition
+spli_length_CNC_CRY_mop <- as.data.frame(table(spli_all_CRY_mop$length,
+                                               spli_all_CRY_mop$region.category,
+                                               spli_all_CRY_mop$condition))
+colnames(spli_length_CNC_CRY_mop) <- c("length","region.category","condition","n")
+
+# filter to keep coding MS with 5-11 pb length & all (size) non-coding MS
+spli_length_CNC_CRY_mop[spli_length_CNC_CRY_mop$region.category %in% "coding" & as.numeric(as.character(spli_length_CNC_CRY_mop$length)) > 11 | spli_length_CNC_CRY_mop$region.category %in% "non-coding" & as.numeric(as.character(spli_length_CNC_CRY_mop$length)) > 20,"n"] <- NA
+
+spli_length_CNC_CRY_mop$N <- NA
+spli_length_CNC_CRY_mop[which(spli_length_CNC_CRY_mop$condition == "CRY_mono"),"N"] <- 1
+spli_length_CNC_CRY_mop[which(spli_length_CNC_CRY_mop$condition == "CRY_oligo"),"N"] <- 4
+spli_length_CNC_CRY_mop[which(spli_length_CNC_CRY_mop$condition == "CRY_poly"),"N"] <- 3
+# mean.length = mean of MS unstable by length & condition
+spli_length_CNC_CRY_mop$mean.length <-
+  spli_length_CNC_CRY_mop$n/spli_length_CNC_CRY_mop$N
+
+# order dataframe
+spli_length_CNC_CRY_mop <-
+  spli_length_CNC_CRY_mop[order(spli_length_CNC_CRY_mop$length),]
+spli_length_CNC_CRY_mop$length <- 
+  factor(as.character(spli_length_CNC_CRY_mop$length),
+         levels = unique(as.character(spli_length_CNC_CRY_mop$length)))
+```
+
+```{r SPLI_barplot_CRY_mono_MSI_CNC_length_plot}
+## y = mean.count
+ggplot(spli_length_CNC_CRY_mop,aes(x = length,y = mean.length,fill = region.category)) +
+  geom_bar(position = "dodge",stat = "identity") +
+  facet_grid(~ condition) +
+  scale_x_discrete(limits = c("5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20")) +
+  scale_fill_manual(values = c("coding" = "#2b8cbeff","non-coding" = "#e6550dff")) +
+  scale_y_continuous(limits = c(0,40),n.breaks = 5) +
+  theme_classic()
+```
+
+Statistic
+
+```{r SPLI_statistic_CRY_mop_MSI_CNC_length}
+# mop = mono, oligo, poly
+spli_length_mop_stat <- as.data.frame(table(spli_all_CRY_mop$patient,
+                                            spli_all_CRY_mop$region.category,
+                                            spli_all_CRY_mop$condition))
+colnames(spli_length_mop_stat) <- c("patient","region.category","condition","n")
+
+#t-test (parametric)
+## comparison CRY vs LGD vs HGD vs ADK (global)
+spli_length_mop_stat_cond <- spli_length_mop_stat[which(
+  spli_length_mop_stat$condition %in% c("CRY_mono","CRY_oligo","CRY_poly")),] %>%
+  group_by() %>%
+  t_test(n ~ condition) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj")
+```
+
+###boxplot
+
+```{r SPLI_boxplot_MSI_CNC_length}
+spli_length_CNC_bxplt <- as.data.frame(table(spli_all$patient,
+                                             spli_all$region.category,
+                                             spli_all$condition))
+colnames(spli_length_CNC_bxplt) <- c("patient","region.category","condition","n")
+# replace 0 with NA
+spli_length_CNC_bxplt[spli_length_CNC_bxplt$n == 0,"n"] <- NA
+```
+
+```{r SPLI_boxplot_MSI_MSppt_length}
+spli_length_MSppt_bxplt <- as.data.frame(table(spli_all$patient,
+                                               spli_all$type,
+                                               spli_all$condition))
+colnames(spli_length_MSppt_bxplt) <- c("patient","splicing.site","condition","n")
+# replace 0 with NA
+spli_length_MSppt_bxplt[spli_length_MSppt_bxplt$n == 0,"n"] <- NA
+```
+
+Regroup CNC with MSppt
+
+```{r SPLI_barplot_MSI_CNC_MSppt_length}
+tp_MSppt <- spli_length_MSppt_bxplt
+colnames(tp_MSppt)[2] <- "region.category"
+tp_CNC <- spli_length_CNC_bxplt
+
+spli_length_CNC_MSppt_bxplt <- rbind(tp_MSppt,tp_CNC)
+
+# order dataframe
+spli_length_CNC_MSppt_bxplt <-
+  spli_length_CNC_MSppt_bxplt[order(spli_length_CNC_MSppt_bxplt$region.category),]
+spli_length_CNC_MSppt_bxplt$region.category <- 
+  factor(as.character(spli_length_CNC_MSppt_bxplt$region.category),
+         levels = c("coding","non-coding","acceptor","donor"))
+```
+
+```{r SPLI_barplot_MSI_CNC_MSppt_length_plot}
+# boxplot
+ggplot(spli_length_CNC_MSppt_bxplt,aes(x = condition,y = n,fill = region.category)) +
+  geom_boxplot(outlier.shape = NA) + 
+  scale_fill_manual(values = c("#2b8cbe","#e6550d","#fd8d3cff","#fdd0a2ff")) + 
+  scale_x_discrete(limits = c("CRY","AD","ADK")) +
+  scale_y_continuous(limits = c(0,600),n.breaks = 4) +
+  theme_classic()
+```
+
+Statistics
+
+```{r SPLI_boxplot_MSI_CNC_MSppt_length_statistic}
+# order dataframe
+rownames(spli_length_CNC_MSppt_bxplt) <- NULL
+
+# shapiro test => test if data follow a normal law (parametric) or not (non-parametric)
+spli_length_CNC_MSppt_bxplt_stat <- cbind(spli_length_CNC_MSppt_bxplt[1:240,c(3,4)], #acc
+                                          spli_length_CNC_MSppt_bxplt[241:480,4], #don
+                                          spli_length_CNC_MSppt_bxplt[481:720,4]) #coding
+colnames(spli_length_CNC_MSppt_bxplt_stat)[c(2,3,4)] <- c("n.acc","n.don","n.C")
+## shapiro test
+shapiro_test(spli_length_CNC_MSppt_bxplt_stat,n.acc,n.don,n.C)
+## p > alpha(=0.05) => h0 is accepted =>  we do not have sufficient evidence to say that sample does not come from a normal distribution => Student test (parametric)
+
+#t-test (parametric)
+## comparison C vs NC vs acc vs don (intracondition)
+stat_spli_CNC.MSppt_RG <- spli_length_CNC_MSppt_bxplt[which(
+  spli_length_CNC_MSppt_bxplt$condition %in% c("CRY","AD","ADK")),] %>%
+  group_by(condition) %>%
+  t_test(n ~ region.category) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj")
+
+## comparison CRY vs LGD vs HGD vs ADK (global)
+stat_spli_CNC.MSppt_cond <- spli_length_CNC_MSppt_bxplt[which(
+  spli_length_CNC_MSppt_bxplt$condition %in% c("CRY","AD","ADK")),] %>%
+  group_by() %>%
+  t_test(n ~ condition) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj")
+```
+
+###Indels Events
+
+Here, calculation of indels events by samples & length repeat class of MS. Indels events represent the number of "unique" mutation for a MS where, for example, a deletion -1 = 1 event, -5 = 5 events.
+
+//!!// We call indels events, but in this study, only deletions events will be calculated and investigated.
+
+####preparation
+
+1.CNC.MSppt_preparation_function
+
+``` {r CNC_MSppt_preparation_function}
+# coding
+MSI.all.C = function(MSI.res){
+  MSI.res.C <- MSI.res[which(MSI.res$region.category %in% "coding"),]
+  return(MSI.res.C)
+}
+# non-coding
+MSI.all.NC = function(MSI.res){
+  MSI.res.NC <- MSI.res[which(MSI.res$region.category %in% "non-coding"),]
+  return(MSI.res.NC)
+}
+# acceptor
+MSI.all.acc = function(MSI.res){
+  MSI.res.acc <- MSI.res[which(MSI.res$type %in% "acceptor"),]
+  return(MSI.res.acc)
+}
+# donor
+MSI.all.don = function(MSI.res){
+  MSI.res.don <- MSI.res[which(MSI.res$type %in% "donor"),]
+  return(MSI.res.don)
+}
+```
+
+2.MSI.CNC.MSppt.all.modification
+
+```{r MSI_all_CNC.MSppt_modification_function}
+MSI.CNC.MSppt.all.modif = function(MSI.CNC.MSppt.all){
+  MSI.CNC.MSppt.all <- MSI.CNC.MSppt.all[,c(1,5,6,9:13)]
+  rownames(MSI.CNC.MSppt.all) = NULL
+  return(MSI.CNC.MSppt.all)
+}
+```
+
+3.indels_events_calculation_function by samples
+
+``` {r indels_events_calculation_samples_function}
+dels.events.samples.calc = function(MSI.CNC.MSppt.all){
+  sum(abs(as.numeric(MSI.CNC.MSppt.all$indels.size)))
+}
+```
+
+####calculation
+
+```{r SPLI_MSI_CNC.MSppt_events_samples_calculation}
+# 1.CNC preparation
+list_names_spli <- names(spli_MSIdels)
+## coding region
+spli_MSI_C <- lapply(spli_MSIdels,FUN = MSI.all.C)
+names(spli_MSI_C) <- paste(list_names_spli,"C",sep = "_")
+## non-coding region
+spli_MSI_NC <- lapply(spli_MSIdels,FUN = MSI.all.NC)
+names(spli_MSI_NC) <- paste(list_names_spli,"NC",sep = "_")
+## acceptor site
+spli_MSI_acc <- lapply(spli_MSIdels,FUN = MSI.all.acc)
+names(spli_MSI_acc) <- paste(list_names_spli,"acc",sep = "_")
+## donor site
+spli_MSI_don <- lapply(spli_MSIdels,FUN = MSI.all.don)
+names(spli_MSI_don) <- paste(list_names_spli,"don",sep = "_")
+
+## C & NC, acc & don region
+spli_MSI_CNC.MSppt <- c(spli_MSI_C,spli_MSI_NC,spli_MSI_acc,spli_MSI_don)
+
+# 2.MSI CNC.MSppt modification
+spli_MSI_CNC.MSppt <- lapply(spli_MSI_CNC.MSppt,FUN = MSI.CNC.MSppt.all.modif)
+
+# 3.deletion events calculation (by samples)
+## s = samples
+spli_MSI_CNC.MSppt_events_s <- lapply(spli_MSI_CNC.MSppt, FUN = dels.events.samples.calc)
+## all in one dataframe
+spli_MSI_CNC.MSppt_events_s_all <- 
+  as.data.frame(do.call(rbind,lapply(spli_MSI_CNC.MSppt,FUN = dels.events.samples.calc)))
+colnames(spli_MSI_CNC.MSppt_events_s_all) <- "indels.events.n"
+## add "cond.CNC.MSppt" variable
+spli_MSI_CNC.MSppt_events_s_all$cond.CNC.MSppt <- rownames(spli_MSI_CNC.MSppt_events_s_all)
+spli_MSI_CNC.MSppt_events_s_all <- spli_MSI_CNC.MSppt_events_s_all[,c(2,1)]
+rownames(spli_MSI_CNC.MSppt_events_s_all) = NULL
+## add "region.category" variable
+spli_MSI_CNC.MSppt_events_s_all$region.category <- spli_MSI_CNC.MSppt_events_s_all$cond.CNC.MSppt
+
+for(i in seq(1,nrow(spli_MSI_CNC.MSppt_events_s_all))) { 
+  if(grepl("_NC",spli_MSI_CNC.MSppt_events_s_all[i,"region.category"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"region.category"] <- "non-coding"
+  } else if(grepl("_acc",spli_MSI_CNC.MSppt_events_s_all[i,"region.category"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"region.category"] <- "acceptor"
+  } else if(grepl("_don",spli_MSI_CNC.MSppt_events_s_all[i,"region.category"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"region.category"] <- "donor"
+  } else if(grepl("_C",spli_MSI_CNC.MSppt_events_s_all[i,"region.category"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"region.category"] <- "coding"
+  }
+}
+## add "condition" variable
+spli_MSI_CNC.MSppt_events_s_all$condition <-  spli_MSI_CNC.MSppt_events_s_all$cond.CNC.MSppt
+
+for(i in seq(1,nrow(spli_MSI_CNC.MSppt_events_s_all))) { 
+  if(grepl("T",spli_MSI_CNC.MSppt_events_s_all[i,"condition"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"condition"] <- "ADK"
+  } else if(grepl("_AD",spli_MSI_CNC.MSppt_events_s_all[i,"condition"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"condition"] <- "AD"
+  } else if(grepl("_CRY",spli_MSI_CNC.MSppt_events_s_all[i,"condition"])){
+    spli_MSI_CNC.MSppt_events_s_all[i,"condition"] <- "CRY"
+  }
+}
+## add "patient" variable
+spli_MSI_CNC.MSppt_events_s_all$patient <- 
+  unlist(lapply(strsplit(spli_MSI_CNC.MSppt_events_s_all$cond.CNC.MSppt,"[_]"),`[[`,1))
+```
+
+####plot & stat
+
+```{r SPLI_MSI_CNC_events_samples_boxplot}
+ggplot(spli_MSI_CNC.MSppt_events_s_all,
+       aes(x = condition,y = indels.events.n,fill = vioplot)) +
+  geom_boxplot(outlier.shape = NA) + 
+  # scale_fill_manual(values = c("#2b8cbe","#e6550d","#fd8d3cff","#fdd0a2ff")) + 
+  scale_x_discrete(limits = c("CRY","AD","ADK")) +
+  # scale_y_continuous(limits = c(0,600),n.breaks = 4) +
+  theme_classic()
+```
+
+```{r SPLI_MSI_CNC_events_samples_violinplot}
+spli_MSI_CNC.MSppt_events_s_all$vioplot <-
+  paste(spli_MSI_CNC.MSppt_events_s_all$condition,
+        spli_MSI_CNC.MSppt_events_s_all$region.category,
+        sep = "_")
+spli_MSI_CNC.MSppt_events_s_all$vioplot <- 
+  factor(spli_MSI_CNC.MSppt_events_s_all$vioplot,
+         levels = c("CRY_coding","CRY_non-coding","CRY_acceptor","CRY_donor",
+                    "AD_coding","AD_non-coding","AD_acceptor","AD_donor",
+                    "ADK_coding","ADK_non-coding","ADK_acceptor","ADK_donor"))
+## plot
+vioplot(spli_MSI_CNC.MSppt_events_s_all$indels.events.n 
+        ~ spli_MSI_CNC.MSppt_events_s_all$vioplot)
+```
+
+Statistics
+
+```{r SPLI_MSI_CNC_events_samples_statistics}
+#t-test (parametric)
+## comparison C vs NC vs acc vs don (intracondition)
+stat_dels_spli_CNC.MSppt_RG <- spli_MSI_CNC.MSppt_events_s_all[which(
+  spli_MSI_CNC.MSppt_events_s_all$condition %in% c("CRY","AD","ADK")),] %>%
+  group_by(condition) %>%
+  t_test(indels.events.n ~ region.category) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj")
+
+## comparison CRY vs LGD vs HGD vs ADK (global)
+stat_dels_spli_CNC.MSppt_cond <- spli_MSI_CNC.MSppt_events_s_all[which(
+  spli_MSI_CNC.MSppt_events_s_all$condition %in% c("CRY","AD","ADK")),] %>%
+  group_by() %>%
+  t_test(indels.events.n ~ condition) %>%
+  adjust_pvalue() %>%
+  add_significance("p.adj")
+```
+
+###MS distance
+
+```{r SPLI_MSI_3FMS_MS_distance_preparation}
+# add S.distance variables
+spli_all_3FMS <- merge(x = spli_all,y = MS_intronic_3FMS[,c(1,3)],
+                       by.x = "MS.id.1",by.y = "MS.id",all.x = T)
+spli_all_3FMS <- spli_all_3FMS[which(spli_all_3FMS$type == "acceptor"),]
+
+# by condition
+## ADK
+spli_all_3FMS_ADK <- spli_all_3FMS[which(spli_all_3FMS$condition == "ADK"),]
+spli_all_3FMS_ADK <- spli_all_3FMS_ADK[!duplicated(spli_all_3FMS_ADK$MS.id.1),]
+## AD
+spli_all_3FMS_AD <- spli_all_3FMS[which(spli_all_3FMS$condition == "AD"),]
+spli_all_3FMS_AD <- spli_all_3FMS_AD[!duplicated(spli_all_3FMS_AD$MS.id.1),]
+## CRY
+spli_all_3FMS_CRY <- spli_all_3FMS[which(spli_all_3FMS$condition == "CRY"),]
+spli_all_3FMS_CRY <- spli_all_3FMS_CRY[!duplicated(spli_all_3FMS_CRY$MS.id.1),]
+## all
+spli_all_3FMS_all <- rbind(spli_all_3FMS_ADK,spli_all_3FMS_AD,spli_all_3FMS_CRY)
+
+# count unstable MS by MS.distance & condition 
+spli_all_3FMS_all_sdf <- as.data.frame(table(spli_all_3FMS_all$MS.distance,
+                                             spli_all_3FMS_all$condition))
+colnames(spli_all_3FMS_all_sdf) <- c("MS.distance","condition","n")
+spli_all_3FMS_all_sdf$MS.distance <- gsub("-","",spli_all_3FMS_all_sdf$MS.distance)
+
+# order
+spli_all_3FMS_all_sdf <- 
+  spli_all_3FMS_all_sdf[order(as.numeric(spli_all_3FMS_all_sdf$MS.distance)),]
+spli_all_3FMS_all_sdf$MS.distance <-
+  factor(as.character(spli_all_3FMS_all_sdf$MS.distance),
+         levels = unique(as.character(spli_all_3FMS_all_sdf$MS.distance)))
+
+spli_all_3FMS_all_sdf$condition <- factor(as.character(spli_all_3FMS_all_sdf$condition),
+                                          levels = c("CRY","AD","ADK"))
+```
+
+```{r SPLI_MSI_3FMS_MS_distance_plot}
+ggplot(spli_all_3FMS_all_sdf,aes(x = MS.distance,y = n)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~condition) +
+  scale_y_continuous(limits = c(0,250)) +
+  theme_classic()
+```
+
+#Splicing signature
+
+Study of ES signature are realized on unstable MS FREE coverage BED ! MSIdels list can not be use for further analysis
+
+##MS.MS.FUN
+
+Application coverage minimum & exclusion of insertion
+
+```{r MS.MS_for_study_of_signatures_function}
+# MS.MS.SIGN.fun = preparation of MS (stable + dels) .res from MS .res, for splicing signature analysis
+# x = MS.res (all MS)
+MS.MS.SIGN.fun = function(MS.res) {
+  # 1) minimum read covered by MS
+  MS.res <- MS.res[which(MS.res$sum_Tum + MS.res$sum_Nor > 10),]
+  # 2) selection of MSI, deletions only !
+  MS.res[is.na(MS.res$del_ins_size),"del_ins_size"] <- 0
+  ## exclusion of insertions
+  MS.res <- MS.res[which(MS.res$del_ins_size < 1),]
+  # 3) MS id correction's (+1)
+  MS.res$MS.start <- unlist(lapply(strsplit(MS.res$id,"[.]"),`[[`, 2))
+  MS.res$MS.start <- as.numeric(MS.res$MS.start)
+  MS.res$MS.start.1 <- MS.res$MS.start + 1
+  MS.res$MS.id.1 <- paste(unlist(lapply(strsplit(MS.res$id,"[.]"),`[[`,1)),
+                          MS.res$MS.start.1,sep = ".")
+  MS.res$Func.refGene <- gsub("exonic;splicing","splicing",MS.res$Func.refGene)
+  MS.MS.res <- MS.res[which(MS.res$Func.refGene %in% c("exonic","intronic","splicing")),]
+  MS.MS.res$region.category <- "NA"
+  MS.MS.res[MS.MS.res$Func.refGene %in% "exonic","region.category"] <- "coding"
+  MS.MS.res[MS.MS.res$Func.refGene 
+            %in% c("intronic","splicing"),"region.category"] <- "non-coding"
+    return(MS.MS.res[,c(1:5,22:28)])
+}
+
+# list of MS (stable + dels) . res (be careful => it is not only the unstable MS !!)
+## input => SPLIMSI 
+spli_MS.MS <- lapply(spli_MS,FUN = MS.MS.SIGN.fun)
+```
+
+##COND.LOOP
+
+```{r COND.LOOP}
+# N = headcount by condition 
+# input => MS covered in all samples
+for(i in seq(1,length(spli_MS.MS))) { 
+  if(grepl("T",names(spli_MS.MS[i]))){
+    spli_MS.MS[[i]]$condition <- "ADK"
+    spli_MS.MS[[i]]$N <- 46
+  } else if(grepl("AD",names(spli_MS.MS[i]))){
+    spli_MS.MS[[i]]$condition <- "AD"
+    spli_MS.MS[[i]]$N <- 14
+  } else if(grepl("CRY",names(spli_MS.MS[i]))){
+    spli_MS.MS[[i]]$condition <- "CRY"
+    spli_MS.MS[[i]]$N <- 8
+  }
+}
+```
+
+##TA985.FUN
+
+Data matching with the TA985 list of genes
+
+```{r MS.MS_TA985_function}
+# MS.TA985.fun = merge between Splicing signature (TA985) &  .res dataframe (all MS)
+# x = MS.res (all MS)
+MS.TA985.fun = function(MS.res) {
+  # merge .res with TA985
+  MSI.TA985.sign <- merge(x = TA985[,c(5,1:4,6:10)],y = MS.res[,c(11,6,13,14)],
+                          by.x = "MS.id",by.y = "MS.id.1",all.x = T)
+  MSI.TA985.sign <- MSI.TA985.sign[order(MSI.TA985.sign$exon.id),]
+  # add ES96 signature to annotations
+  for (i in seq(1,nrow(MSI.TA985.sign))) {
+    if (MSI.TA985.sign[i,"MS.id"] %in% ES96$MS.id) {
+      MSI.TA985.sign[i,"ES96"] <- "Yes"
+      } else {
+        MSI.TA985.sign[i,"ES96"] <- "No"
+      }
+    }
+  # add DD134 signature to annotations
+  for (i in seq(1,nrow(MSI.TA985.sign))) {
+    if (MSI.TA985.sign[i,"gene"] %in% DD134$gene) {
+      MSI.TA985.sign[i,"DD134"] <- "Yes"
+      } else {
+        MSI.TA985.sign[i,"DD134"] <- "No"
+      }
+    }
+  return(MSI.TA985.sign[,c(2:5,1,6:15)])
+}
+
+## input => SPLIMSI 
+spli_TA985 <- lapply(spli_MS.MS,FUN = MS.TA985.fun)
+```
+
+##MSI.FUN
+
+Selection of unstable MS
+
+```{r SPLI_MSI.MS_function}
+# selection of only unstable MS inside TA985
+spli_TA985_dels <- lapply(spli_TA985,function(MS.TA985.res) {
+  MSI.TA985.res <- MS.TA985.res[which(MS.TA985.res$del_ins_size != 0),]
+  return(MSI.TA985.res)})
+
+# selection of all unstable MS
+spli_MSI.MS <- lapply(spli_MS.MS,function(MSI.MS.res) {
+  MSI.MS.res <- MSI.MS.res[which(MSI.MS.res$del_ins_size != 0),]
+  MSI.MS.res <- MSI.MS.res[,c(11,1,8,12,7,4:6,13,14)]
+  colnames(MSI.MS.res) <- c("MS.id.1","MS.id","gene","region.category","gene.region",
+                            "nucleotide","length","indels.size","condition","N")
+  return(MSI.MS.res)})
+```
+
+##MS Distance
+
+```{r functional_TA985m_data_preparation}
+# regroup unstable MS from TA985 in all conditions
+spli_TA985_dels_all <- do.call(rbind,spli_TA985_dels)
+# delete del_ins_size variable to remove duplicates
+spli_TA985_dels_all[,"del_ins_size"] <- NULL
+rownames(spli_TA985_dels_all) <- NULL
+spli_TA985_dels_all <- unique(spli_TA985_dels_all)
+
+# ONLY DD134 description => remove duplicated gene by condition independently of MS.id
+## ADK
+spli_TA985_dels_ADK <- 
+  spli_TA985_dels_all[which(spli_TA985_dels_all$condition == "ADK"),]
+## AD
+spli_TA985_dels_AD <- 
+  spli_TA985_dels_all[which(spli_TA985_dels_all$condition == "AD"),]
+## CRY
+spli_TA985_dels_CRY <- 
+  spli_TA985_dels_all[which(spli_TA985_dels_all$condition == "CRY"),]
+## all, uMS = remove duplicates MS intra condition => unique MS
+spli_TA985_dels_all_uMS <-
+  rbind(spli_TA985_dels_ADK[!duplicated(spli_TA985_dels_ADK$gene),],
+        spli_TA985_dels_AD[!duplicated(spli_TA985_dels_AD$gene),],
+        spli_TA985_dels_CRY[!duplicated(spli_TA985_dels_CRY$gene),])
+```
+
+###Genomic
+
+```{r data_preparation}
+MS_MSppt <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/1_DATAS_Vincent/3.Acceptor.Stop.All.txt",header = T,sep = " ",stringsAsFactors = F)
+
+MS_MSppt$distance <- rownames(MS_MSppt)
+rownames(MS_MSppt) <- NULL
+MS_MSppt <- MS_MSppt[,c(6,1)]
+colnames(MS_MSppt) <- c("distance","MS.all")
+MS_MSppt$distance <- gsub("-","",MS_MSppt$distance)
+
+MS_MSppt <- MS_MSppt[order(as.numeric(MS_MSppt$distance),decreasing = T),]
+MS_MSppt$distance <- factor(as.character(MS_MSppt$distance),
+                            levels = unique(as.character(MS_MSppt$distance)))
+
+ggplot(MS_MSppt,aes(x = distance,y = MS.all)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(breaks = c(0,2000,4000,6000,8000,10000)) +
+  theme_classic()
+```
+
+###TA985
+
+```{r TA985_MS_distance}
+# TA985 all
+TA985_dist <- as.data.frame(table(TA985$MS.distance))
+colnames(TA985_dist) <- c("MS.distance","n")
+
+ggplot(TA985_dist,aes(x = MS.distance,y = n)) +
+  geom_bar(stat = "identity") +
+  scale_x_discrete(limits = c("0","1","2","3","4","5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20","21","22","23",
+                              "24","25","26","27","28","29","30","31","32","33","34",
+                              "35","36","37","38","39","40","41","42","43","44","45",
+                              "46","47","48","49","50")) +
+  scale_y_continuous(n.breaks = 5) +
+  labs(title = "TA985") +
+  theme_classic()
+```
+
+###ES96m
+
+```{r SPLI_ES96m_MS_distance}
+# selection of ES96 MS only
+spli_TA985_dels_dist.ES96 <- 
+  spli_TA985_dels_all[which(spli_TA985_dels_all$ES96 == "Yes"),]
+
+spli_TA985_dels_dist.ES96 <- as.data.frame(table(spli_TA985_dels_dist.ES96$MS.distance,
+                                                 spli_TA985_dels_dist.ES96$condition))
+colnames(spli_TA985_dels_dist.ES96) <- c("MS.distance","condition","n")
+
+# condition order
+spli_TA985_dels_dist.ES96$condition <- 
+  factor(as.character(spli_TA985_dels_dist.ES96$condition),
+         levels = c("CRY","AD","ADK"))
+
+ggplot(spli_TA985_dels_dist.ES96,aes(x = MS.distance,y = n)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~condition) +
+  scale_x_discrete(limits = c("0","1","2","3","4","5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20","21","22","23",
+                              "24","25","26","27","28","29","30","31","32","33","34",
+                              "35","36","37","38","39","40","41","42","43","44","45",
+                              "46","47","48","49","50")) +
+  # scale_y_continuous(limits = c(0,20),n.breaks = 5) +
+  labs(title = "ES96") +
+  theme_classic()
+```
+
+```{r SPLI_ES96m_condition_MS_distance_mean}
+# no significant difference between condition => mean of all condition in one plot
+spli_TA985_dels_dist.ES96_mean <-
+  data.frame(MS.distance = spli_TA985_dels_dist.ES96[c(1:22),"MS.distance"])
+
+spli_TA985_dels_dist.ES96_mean$n <- 
+  gapply(spli_TA985_dels_dist.ES96,groups = spli_TA985_dels_dist.ES96$MS.distance,
+         FUN = function(MS.distance){
+           MS.distance.mean <- mean(MS.distance$n)
+           return(MS.distance.mean)})
+
+spli_TA985_dels_dist.ES96_mean$n <- round(spli_TA985_dels_dist.ES96_mean$n,digits = 0)
+
+ggplot(spli_TA985_dels_dist.ES96_mean,aes(x = MS.distance,y = n)) +
+  geom_bar(stat = "identity") +
+  scale_x_discrete(limits = c("0","1","2","3","4","5","6","7","8","9","10","11","12",
+                              "13","14","15","16","17","18","19","20","21","22","23",
+                              "24","25","26","27","28","29","30","31","32","33","34",
+                              "35","36","37","38","39","40","41","42","43","44","45",
+                              "46","47","48","49","50")) +
+  scale_y_continuous(limits = c(0,20),n.breaks = 5) +
+  labs(title = "ES96 - mean all condition") +
+  theme_classic()
+```
+
+##Deletion size
+
+```{r SPLI_ES96_condition_deletion_size_PSI_preparation}
+spli_ES96 <- lapply(spli_TA985,FUN = function(spli.TA985){
+  spli.ES96 <- spli.TA985[which(spli.TA985$ES96 == "Yes"),]
+})
+
+spli_ES96_all <- do.call(rbind,spli_ES96)
+spli_ES96_all$patient <- row.names(spli_ES96_all)
+rownames(spli_ES96_all) <- NULL
+spli_ES96_all$patient <- gsub("*T.[0-9]{1,4}","",spli_ES96_all$patient)
+spli_ES96_all$patient <- gsub("TMSI505.[0-9]{1,4}","TMSI505",spli_ES96_all$patient)
+spli_ES96_all$patient <- gsub("TMSI564.[0-9]{1,4}","TMSI564",spli_ES96_all$patient)
+spli_ES96_all$patient <- gsub("TMSI570.[0-9]{1,4}","TMSI570",spli_ES96_all$patient)
+spli_ES96_all$patient <- gsub("TMSI577.[0-9]{1,4}","TMSI577",spli_ES96_all$patient)
+spli_ES96_all$patient <- 
+  gsub("_((LS|SP)[0-9]{2}|(LS|SP)[0-9]{2}(a|b))_(AD1|AD2|CRY)_(MSI|MSS).[0-9]{1,4}",
+       "",spli_ES96_all$patient)
+
+spli_ES96_all$samples <- paste(spli_ES96_all$patient,spli_ES96_all$condition,sep = "_")
+# remove not covered (= NA)
+spli_ES96_all <- spli_ES96_all[!(is.na(spli_ES96_all$del_ins_size)),] # nrow = 5605
+# rename columns
+colnames(spli_ES96_all)[11] <- "dels.size" 
+
+# list of mutated MS only
+spli_ES96m_all <- spli_ES96_all[which(spli_ES96_all$dels.size < 0),] # nrow = 2809
+```
+
+```{r SPLI_ES96_condition_deletion_size_PSI_boxplot}
+# list of group by MS.id  
+spli_ES96_all_MSid <- gapply(spli_ES96_all,
+                             groups = spli_ES96_all$MS.id,
+                             FUN = function(x){return(x)})
+# separate alternative than constitutive
+## alternative
+spli_ES96_all_MSid_alt <- lapply(spli_ES96_all_MSid,FUN = function(ES96.MSid){
+  alternative <- ES96.MSid[which(ES96.MSid$exon.type == "alternative"),]
+  return(alternative)})
+## constitutive
+spli_ES96_all_MSid_cst <- lapply(spli_ES96_all_MSid,FUN = function(ES96.MSid){
+  constitutive <- ES96.MSid[which(ES96.MSid$exon.type == "constitutive"),]
+  return(constitutive)})
+
+# boxplot
+## unique
+ggplot(spli_ES96_all[spli_ES96_all$MS.id == "chrX.85134074",],
+       aes(x = condition,y = dels.size,color = condition)) +
+  geom_boxplot(outlier.shape = NA) + 
+  geom_point(position = position_jitter(w = 0.4,h = 0),size = 3) +
+  # scale_fill_manual(values = c(CRY = "#ffffffff",AD = "#ffffffff",ADK = "#ffffffff")) +
+  scale_color_manual(values = c(CRY = "#e28b00ff",AD = "#796503ff",ADK = "#962d00ff")) +
+  scale_x_discrete(limits = c("CRY","AD","ADK")) +
+  coord_flip() +
+  labs(
+    title = paste("gene: ",spli_ES96_all$gene,
+                  "exon: ",unlist(lapply(strsplit(spli_ES96_all$exon.id,
+                                                  "[.]"), `[[`, 3)),
+                  "type:",spli_ES96_all$exon.type,
+                  sep = ", "),
+    caption = paste("MS: ",spli_ES96_all$MS.id,
+                    "length: ",spli_ES96_all$MS.repeat.length,
+                    "distance: ",spli_ES96_all$MS.distance,
+                    sep = ", ")) +
+  ylab("Deletion size") +
+  theme_classic() +
+  guides(x = "axis_truncated",y = "axis_truncated") +
+  theme(axis.line.y = element_blank(),axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),axis.title.y = element_blank(),
+        axis.title.x = element_text(family = "Roboto normal",size = 12),
+        axis.text.x = element_text(family = "Roboto normal",size = 10),
+        plot.title = element_text(family = "Roboto",size = 16,hjust = 0.5),
+        plot.caption = element_text(family = "Roboto normal",size = 16,hjust = 0.5),
+        legend.position = "none",
+        axis.ticks.length = unit(2,"mm"))
+
+## multiple
+lapply(spli_ES96_all_MSid_alt,FUN = function(ES96.MSid){
+  pdf(file = paste0(paste(ES96.MSid$MS.id,ES96.MSid$gene,sep = "_"),".pdf"))
+  print(
+    ggplot(ES96.MSid,aes(x = condition,y = dels.size,color = condition)) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_point(position = position_jitter(w = 0.4,h = 0),size = 3) +
+      scale_color_manual(values = c(CRY = "#e28b00ff",AD = "#796503ff",
+                                    ADK = "#962d00ff")) +
+      scale_x_discrete(limits = c("CRY","AD","ADK")) +
+      coord_flip() +
+      labs(
+        title = paste("gene: ",ES96.MSid$gene,
+                      "exon: ",unlist(lapply(strsplit(ES96.MSid$exon.id,
+                                                      "[.]"), `[[`, 3)),
+                      "type:",ES96.MSid$exon.type,
+                      sep = ", "),
+        caption = paste("MS: ",ES96.MSid$MS.id,
+                        "length: ",ES96.MSid$MS.repeat.length,
+                        "distance: ",ES96.MSid$MS.distance,
+                        sep = ", ")) +
+      ylab("Deletion size") +
+      theme_classic() +
+      guides(x = "axis_truncated",y = "axis_truncated") +
+      theme(axis.line.y = element_blank(),axis.ticks.y = element_blank(),
+            axis.text.y = element_blank(),axis.title.y = element_blank(),
+            axis.title.x = element_text(size = 12),
+            axis.text.x = element_text(size = 10),
+            plot.title = element_text(face = "bold",size = 16,hjust = 0.5),
+            plot.caption = element_text(size = 16,hjust = 0.5),
+            legend.position = "none",
+            axis.ticks.length = unit(2,"mm"))
+    )
+  dev.off()
+  })
+```
+
+#Functional Spli-Coding
+
+##Metadata
+
+```{r SPLI_metadata_DOS_HT}
+metadata_HT <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/MSICare.all/EarlyMSI_TIMSI_splicoter_MSICareScore_modified.txt",header = T,stringsAsFactors = F,sep = ",")
+# regroup adenoma (AD) in condition
+metadata_HT$condition2 <- gsub("LGD|HGD","AD",metadata_HT$condition)
+
+metadata_HT <- metadata_HT[,c(1:3,8,6)]
+metadata_HT$samples <- paste(metadata_HT$id,metadata_HT$condition2,sep = "_")
+
+# add mono/oligo/poly precision in cond.HT variable
+metadata_HT$cond.HT <- metadata_HT$condition2
+## mono
+metadata_HT[grepl("LS04A_CRY",metadata_HT$samples),"cond.HT"] <- "1.CRY_A.mono"
+## oligo
+metadata_HT[grepl("(LS02|LS04B|LS06|LS08A)_CRY",metadata_HT$samples),"cond.HT"] <- "1.CRY_B.oligo"
+## poly
+metadata_HT[grepl("(LS03|LS07|LS08B)_CRY",metadata_HT$samples),"cond.HT"] <- "1.CRY_C.poly"
+
+# rename cond.HT 
+## \\AD\\b = exact match
+metadata_HT$cond.HT <- gsub("\\AD\\b","2.AD",metadata_HT$cond.HT)
+metadata_HT$cond.HT <- gsub("\\ADK\\b","3.ADK",metadata_HT$cond.HT)
+
+# add cond.MSICare variable
+metadata_HT$cond.MSICare <- paste(metadata_HT$cond.HT,
+                                  metadata_HT$pourcentage,
+                                  sep = "_")
+# order
+metadata_HT <- metadata_HT[order(metadata_HT$cond.MSICare),]
+```
+
+##MS list
+
+###Splicing
+
+```{r data_preparation}
+# MS.TA985.mat.fun = repertory of deletion size of unstable MS from TA985 signature ;
+# 2 values possible => deletion size or 0 (not mutated), & NA (not covered)
+# x = out put of MS.id.1.fun
+MS.TA985.mat.fun = function(MS.TA985) {
+  MS.TA985.id <- MS.TA985[,"MS.id"] # for rownames
+  MS.TA985 <- MS.TA985[,"del_ins_size"]
+  names(MS.TA985) <- MS.TA985.id
+  return(MS.TA985)
+}
+
+## input => SPLIMSI 
+spli.TA985.mat <- lapply(spli_TA985,FUN = MS.TA985.mat.fun)
+# rbind in the form of a matrix (row = TA985.MS, col = samples)
+spli_TA985_mat <- t(do.call(rbind,spli.TA985.mat)) #spli_TA985_dels_all
+```
+
+```{r SPLI_TA985_preparation_legend_HT}
+# DOS = Double (variable) Order Sorted ; input => named vector (!! not a matrix !!)
+spli_TA985_DOS <- spli_TA985_mat
+
+# replace values
+spli_TA985_DOS[grepl("[1-9]",spli_TA985_DOS)] <- "mutated"
+spli_TA985_DOS[grepl("0|NA",spli_TA985_DOS)] <- "non-mutated"
+
+# pre-create dataframe of MS.statut for each MS id & samples
+spli_TA985_legend_DOS <- data.frame(MS.id = NULL,MS.id.statut = NULL)
+# list MS.statut for each MS id & samples
+for(i in seq(1,nrow(spli_TA985_DOS))) {
+  rep.rownames <- data.frame(rep(rownames(spli_TA985_DOS)[i],
+                                 times = ncol(spli_TA985_DOS)),
+                             spli_TA985_DOS[i,])
+  spli_TA985_legend_DOS = rbind(spli_TA985_legend_DOS,rep.rownames)
+  }
+
+colnames(spli_TA985_legend_DOS) <- c("MS.id","MS.id.statut")
+
+spli_TA985_legend_DOS_sdf <- as.data.frame(table(spli_TA985_legend_DOS$MS.id,
+                                                 spli_TA985_legend_DOS$MS.id.statut,
+                                                 useNA = "ifany"))
+colnames(spli_TA985_legend_DOS_sdf) <- c("MS.id","MS.id.statut","MS.id.n")
+# add sample size variables
+# standard
+spli_TA985_legend_DOS_sdf$N <- rep(68,nrow(spli_TA985_legend_DOS_sdf))
+# taking into account NA (not covered)
+spli_TA985_legend_DOS_sdf$N.na <- 
+  gapply(spli_TA985_legend_DOS_sdf,groups = spli_TA985_legend_DOS_sdf$MS.id,
+         FUN = function(legend.DOS.sdf){
+    legend.DOS.sdf$N.na <- NA
+    legend.DOS.sdf$N.na <-
+      as.numeric(legend.DOS.sdf[is.na(legend.DOS.sdf$MS.id.statut),"MS.id.n"])
+    return(legend.DOS.sdf[3,"N.na"])})
+spli_TA985_legend_DOS_sdf$N.na <- 
+  spli_TA985_legend_DOS_sdf$N - spli_TA985_legend_DOS_sdf$N.na
+# calculate frequencies
+spli_TA985_legend_DOS_sdf$MS.id.freq <- 
+  as.numeric(spli_TA985_legend_DOS_sdf$MS.id.n / spli_TA985_legend_DOS_sdf$N.na)
+# add gene names
+spli_TA985_legend_DOS_sdf <- merge(x = spli_TA985_legend_DOS_sdf,y = TA985,by = "MS.id")
+# select only "mutated" MS in "MS.id.statut" variables
+spli_TA985_legend_DOS_sdf <-
+  spli_TA985_legend_DOS_sdf[which(spli_TA985_legend_DOS_sdf$MS.id.statut 
+                                  %in% "mutated"),]
+
+# add ES96 signature to annotations
+for (i in seq(1,nrow(spli_TA985_legend_DOS_sdf))) {
+  if (spli_TA985_legend_DOS_sdf[i,"MS.id"] %in% ES96$MS.id) {
+    spli_TA985_legend_DOS_sdf[i,"ES96"] <- "Yes"
+  } else {
+    spli_TA985_legend_DOS_sdf[i,"ES96"] <- "No"
+  }
+}
+
+# order
+spli_TA985_legend_DOS_sdf <-
+  spli_TA985_legend_DOS_sdf[order(spli_TA985_legend_DOS_sdf$exon.id),]
+
+# cut off min 13.5% covered (N = 20) => covered in all except ADK (n=48/68)
+spli_TA985_legend_DOS_sdf2 <-
+  spli_TA985_legend_DOS_sdf[which(spli_TA985_legend_DOS_sdf$N.na > 19),]
+
+# # supp table
+# earlyMSI_TA985_S1 <- early_TA985_legend_DOS_sdf
+# earlyMSI_TA985_S1 <- 
+#   earlyMSI_TA985_S1[order(earlyMSI_TA985_S1$MS.id.freq,decreasing = T),]
+# write.table(earlyMSI_TA985_S1,file = "EarlyMSI_TA985.csv",sep = ",",col.names = T,row.names = F)
+# rm(earlyMSI_TA985_S1)
+```
+
+```{r SPLI_ES96mcov_preparation_legend_HT}
+# select ES96 only (mutated and covered)
+spli_ES96_legend_DOS_sdf <- 
+  spli_TA985_legend_DOS_sdf2[which(spli_TA985_legend_DOS_sdf2$ES96 == "Yes"),]
+```
+
+###Coding
+
+```{r SPLI_coding_unstable_MS_data_preparation}
+# select coding unstable MS
+spli_MSI_C <- lapply(spli_MSI.MS,FUN = function(MSI.all){
+  MSI.coding <- MSI.all[which(MSI.all$region.category == "coding"),]
+  return(MSI.coding)})
+# union of MS coding mutated in samples
+spli.MSI.C.uni <- data.frame(
+  MS.id = Reduce(union,lapply(spli_MSI_C,FUN = function(MSI.coding){
+    return(MSI.coding$MS.id)})))
+```
+
+```{r SPLI_coding_MS_data_preparation}
+# all MS filter by coding union
+spli_MS_C_uni <- lapply(spli_MS.MS,FUN = function(MS.all){
+  MS.coding <- MS.all[which(MS.all$region.category == "coding"),]
+  MS.coding <- MS.coding[,c(11,1,8,12,7,4,5,6,13,14)]
+  colnames(MS.coding) <- c("MS.id.1","MS.id","gene","region.category","gene.region",
+                           "nucleotide","length","indels.size","condition","N")
+  MS.coding.uni <- merge(x = spli.MSI.C.uni,y = MS.coding,by = "MS.id",all.x = T)
+  return(MS.coding.uni)})
+
+# MS.coding.mat.fun = repertory of deletion size of unstable MS from all coding ;
+# 2 values possible => deletion size or 0 (not mutated), & NA (not covered)
+# x = out put of MS.id.1.fun
+MS.coding.mat.fun = function(MS.coding.uni){
+  MS.coding.uni.id <- MS.coding.uni[,"MS.id"] # for rownames
+  MS.coding.dels <- MS.coding.uni[,"indels.size"]
+  names(MS.coding.dels) <- MS.coding.uni.id
+  return(MS.coding.dels)
+}
+
+## input => SPLIMSI 
+spli.coding.uni.mat <- lapply(spli_MS_C_uni,FUN = MS.coding.mat.fun)
+# rbind in the form of a matrix (row = M.id, col = samples)
+spli_C_uni_mat <- t(do.call(rbind,spli.coding.uni.mat))
+```
+
+```{r SPLI_BED_coding}
+spli_BED_C <- do.call(rbind,spli_MS_C_uni)
+rownames(spli_BED_C) <- NULL
+spli_BED_C <- spli_BED_C[-which(is.na(spli_BED_C$MS.id.1)),]
+spli_BED_C <- spli_BED_C[,-c(8:10)]
+spli_BED_C <- unique(spli_BED_C)
+```
+
+```{r SPLI_Coding_preparation_legend_HT}
+# DOS = Double (variable) Order Sorted ; input => named vector (!! not a matrix !!)
+spli_C_DOS <- spli_C_uni_mat
+
+# replace values
+spli_C_DOS[grepl("[1-9]",spli_C_DOS)] <- "mutated"
+spli_C_DOS[grepl("0",spli_C_DOS)] <- "non-mutated"
+# spli_C_DOS[is.na(spli_C_DOS)] <- "non-mutated"
+
+# pre-create dataframe of MS.statut for each MS id & samples
+spli_C_legend_DOS <- data.frame(MS.id = NULL,MS.id.statut = NULL)
+# list MS.statut for each MS id & samples
+for(i in seq(1,nrow(spli_C_DOS))) {
+  rep.rownames <- data.frame(rep(rownames(spli_C_DOS)[i],
+                                 times = ncol(spli_C_DOS)),
+                             spli_C_DOS[i,])
+  spli_C_legend_DOS = rbind(spli_C_legend_DOS,rep.rownames)
+  }
+
+colnames(spli_C_legend_DOS) <- c("MS.id","MS.id.statut")
+
+spli_C_legend_DOS_sdf <- as.data.frame(table(spli_C_legend_DOS$MS.id,
+                                             spli_C_legend_DOS$MS.id.statut,
+                                             useNA = "ifany"))
+colnames(spli_C_legend_DOS_sdf) <- c("MS.id","MS.id.statut","MS.id.n")
+# add sample size variables
+# standard
+spli_C_legend_DOS_sdf$N <- rep(68,nrow(spli_C_legend_DOS_sdf))
+# taking into account NA (not covered)
+spli_C_legend_DOS_sdf$N.na <- 
+  gapply(spli_C_legend_DOS_sdf,groups = spli_C_legend_DOS_sdf$MS.id,
+         FUN = function(legend.DOS.sdf){
+    legend.DOS.sdf$N.na <- NA
+    legend.DOS.sdf$N.na <-
+      as.numeric(legend.DOS.sdf[is.na(legend.DOS.sdf$MS.id.statut),"MS.id.n"])
+    return(legend.DOS.sdf[3,"N.na"])})
+spli_C_legend_DOS_sdf$N.na <- 
+  spli_C_legend_DOS_sdf$N - spli_C_legend_DOS_sdf$N.na
+# calculate frequencies
+spli_C_legend_DOS_sdf$MS.id.freq <- 
+  as.numeric(spli_C_legend_DOS_sdf$MS.id.n / spli_C_legend_DOS_sdf$N.na)
+# add gene names
+spli_C_legend_DOS_sdf <- merge(x = spli_C_legend_DOS_sdf,y = spli_BED_C,by = "MS.id")
+# select only "mutated" MS in "MS.id.statut" variables
+spli_C_legend_DOS_sdf <-
+  spli_C_legend_DOS_sdf[which(spli_C_legend_DOS_sdf$MS.id.statut %in% "mutated"),]
+
+# order
+spli_C_legend_DOS_sdf <-
+  spli_C_legend_DOS_sdf[order(spli_C_legend_DOS_sdf$MS.id),]
+
+# remove MS repeat length > 11
+spli_C_legend_DOS_sdf <- 
+  spli_C_legend_DOS_sdf[-which(spli_C_legend_DOS_sdf$length > 11),]
+
+# select by MF > 0.3
+spli_C_legend_DOS_sdf2 <-
+  spli_C_legend_DOS_sdf[which(spli_C_legend_DOS_sdf$MS.id.freq > 0.3),]
+
+# coverage : cut off min 50% covered (N = 34)
+spli_C_legend_DOS_sdf2 <-
+  spli_C_legend_DOS_sdf2[which(spli_C_legend_DOS_sdf2$N.na > 33),]
+
+# # supp table
+# earlyMSI_TA985_S1 <- early_TA985_legend_DOS_sdf
+# earlyMSI_TA985_S1 <- 
+#   earlyMSI_TA985_S1[order(earlyMSI_TA985_S1$MS.id.freq,decreasing = T),]
+# write.table(earlyMSI_TA985_S1,file = "EarlyMSI_TA985.csv",sep = ",",col.names = T,row.names = F)
+# rm(earlyMSI_TA985_S1)
+```
+
+###C-MFMC
+
+Most Frequent unstable coding MS in CRC were define by Vincent Jonchere in GMGH 2018 (Supp Fig.5) 
+
+```{r SPLI_MFMC_preparation_legend_HT}
+# mfmc = most frequent MSI in CRC
+MFMC <- read.delim(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/DATA/Most_frequent_unstable_MS_CRC.bed",header = F,sep = " ",stringsAsFactors = F)
+
+spli_MFMC_legend_DOS_sdf <- 
+  spli_C_legend_DOS_sdf[which(spli_C_legend_DOS_sdf$MS.id %in% MFMC$V1),]
+```
+
+##Tumorigenesis kinectic
+
+Here, we describe tumorigenesis kinetic through coding and splicing (ES96) mutation events in order (to trying) to identify old & new MS drivers in the CRC MSI kinetic.
+
+###Coding
+
+####MF
+
+```{r SPLI_Coding_condition_MF_data_preparation}
+spli_C_DOS_sdf <- 
+  spli_C_DOS[which(rownames(spli_C_DOS) %in% spli_C_legend_DOS_sdf2$MS.id),]
+# object transformation from double to character
+spli_C_DOS_sdf[is.na(spli_C_DOS_sdf)] <- "NA"
+# replace NA by "NA"
+spli_C_DOS_sdf[grepl("NA",spli_C_DOS_sdf)] <- NA
+# replace values /!\ KEEP NA /!\
+spli_C_DOS_sdf[grepl("[1-9]",spli_C_DOS_sdf)] <- "mutated"
+spli_C_DOS_sdf[grepl("0",spli_C_DOS_sdf)] <- "non-mutated"
+
+# list from coding deletion matrix, by condition
+spli_C_MF_sdf <- list(
+  spli_C_DOS_ADK = spli_C_DOS_sdf[,grepl("T",colnames(spli_C_DOS_sdf))],
+  spli_C_DOS_AD = spli_C_DOS_sdf[,grepl("AD",colnames(spli_C_DOS_sdf))],
+  spli_C_DOS_CRY = spli_C_DOS_sdf[,grepl("CRY",colnames(spli_C_DOS_sdf))])
+```
+
+```{r SPLI_Coding_condition_MF_function}
+# calculation of mutational frequency for each MS from coding & by condition
+C.MF.cond = function(C.DOS.mat){
+  # pre-create dataframe of MS.statut for each MS id & samples
+  C.MF.sdf <- data.frame(MS.id = NULL,MS.id.statut = NULL)
+  # list MS.statut for each MS id & samples
+  for(i in seq(1,nrow(C.DOS.mat))){
+    rep.rownames <- data.frame(rep(rownames(C.DOS.mat)[i],
+                                   times = ncol(C.DOS.mat)),
+                               C.DOS.mat[i,])
+    C.MF.sdf = rbind(C.MF.sdf,rep.rownames)}
+  colnames(C.MF.sdf) <- c("MS.id","MS.id.statut")
+  C.MF <- as.data.frame(table(C.MF.sdf$MS.id,
+                              C.MF.sdf$MS.id.statut,
+                              useNA = "ifany"))
+  colnames(C.MF) <- c("MS.id","MS.id.statut","MS.id.n")
+  # add sample size variables
+  ## standard
+  C.MF$N <- rep(ncol(C.DOS.mat),nrow(C.MF))
+  ## taking into account NA (not covered)
+  C.MF$N.na <-  gapply(C.MF,groups = C.MF$MS.id,FUN = function(MF.DOS){
+    MF.DOS$N.na <- NA
+    MF.DOS$N.na <- as.numeric(MF.DOS[is.na(MF.DOS$MS.id.statut),"MS.id.n"])
+    return(MF.DOS[3,"N.na"])})
+  C.MF$N.na <- C.MF$N - C.MF$N.na
+  # calculate frequencies
+  C.MF$MS.id.freq <- as.numeric(C.MF$MS.id.n / C.MF$N.na)
+  # add gene names
+  C.MF <- merge(x = C.MF,y = spli_BED_C,by = "MS.id")
+  # select only "mutated" MS in "MS.id.statut" variables
+  C.MF <- C.MF[which(C.MF$MS.id.statut %in% "mutated"),]
+  C.MF <- C.MF[order(C.MF$MS.id),]
+  # C.MF <- C.MF[,c(7,1,10,3,5,6,8,9,11:15)]
+  return(C.MF)
+}
+```
+
+```{r SPLI_Coding_condition_MF}
+# input = list of matrix sorted by condition
+spli_C_MF_lst <- lapply(spli_C_MF_sdf,FUN = C.MF.cond)
+# regroup all in one df
+spli_C_MF <- cbind(spli_C_MF_lst$spli_C_DOS_ADK,
+                   spli_C_MF_lst$spli_C_DOS_AD[,c(3,5,6)],
+                   spli_C_MF_lst$spli_C_DOS_CRY[,c(3,5,6)])
+colnames(spli_C_MF)[c(3:6,13:18)] <- c("MS.id.n.ADK","N.ADK","N.na.ADK","MF.ADK",
+                                       "MS.id.n.AD","N.na.AD","MF.AD",
+                                       "MS.id.n.CRY","N.na.CRY","MF.CRY")
+# add N.na.all
+spli_C_MF$N.na.all <- spli_C_MF$N.na.ADK + spli_C_MF$N.na.AD + spli_C_MF$N.na.CRY
+# add MS.n.all (number of mutated MS in all conditions)
+spli_C_MF$MS.n.all <- spli_C_MF$MS.id.n.ADK + spli_C_MF$MS.id.n.AD + spli_C_MF$MS.id.n.CRY
+# add global MF (MF.all)
+spli_C_MF$MF.all <- spli_C_MF$MS.n.all / spli_C_MF$N.na.all
+# NaN = 0/0 => replace by NA 
+spli_C_MF[is.nan(spli_C_MF$MF.ADK),"MF.ADK"] <- NA
+spli_C_MF[is.nan(spli_C_MF$MF.AD),"MF.AD"] <- NA
+spli_C_MF[is.nan(spli_C_MF$MF.CRY),"MF.CRY"] <- NA
+# rounding
+spli_C_MF$MF.ADK <- round(spli_C_MF$MF.ADK,digits = 2)
+spli_C_MF$MF.AD <- round(spli_C_MF$MF.AD,digits = 2)
+spli_C_MF$MF.CRY <- round(spli_C_MF$MF.CRY,digits = 2)
+spli_C_MF$MF.all <- round(spli_C_MF$MF.all,digits = 2)
+
+# order columns
+spli_C_MF <- spli_C_MF[,c(1,8,9,12,20,19,21,6,15,18,5,14,17)]
+colnames(spli_C_MF)[c(3,4)] <- c("category","repeat.length")
+```
+
+####MD
+
+```{r SPLI_Coding_condition_MD}
+# MD = median of deletion (only for mutated MS from each condition) 
+spli_C_uni_mat_MD <- 
+  spli_C_uni_mat[which(rownames(spli_C_DOS) %in% spli_C_MF$MS.id),]
+# replace not mutated (cf 0 values) by NA (excluded to median calculation)
+spli_C_uni_mat_MD[grepl("0",spli_C_uni_mat_MD)] <- NA
+# calculation of median of deletion (MD) for each MS from coding & by condition
+spli_C_MD <- data.frame(
+  MD.ADK = gapply(as.data.frame(
+    spli_C_uni_mat_MD[,grepl("T",colnames(spli_C_uni_mat_MD))]),
+    groups = rownames(spli_C_uni_mat_MD),FUN = function(C.dels){
+      C.dels.med <- median(as.numeric(C.dels),na.rm = T)
+      return(C.dels.med)}),
+  MD.AD = gapply(as.data.frame(
+    spli_C_uni_mat_MD[,grepl("AD",colnames(spli_C_uni_mat_MD))]),
+    groups = rownames(spli_C_uni_mat_MD),FUN = function(C.dels){
+      C.dels.med <- median(as.numeric(C.dels),na.rm = T)
+      return(C.dels.med)}),
+  MD.CRY = gapply(as.data.frame(
+    spli_C_uni_mat_MD[,grepl("CRY",colnames(spli_C_uni_mat_MD))]),
+    groups = rownames(spli_C_uni_mat_MD),FUN = function(C.dels){
+      C.dels.med <- median(as.numeric(C.dels),na.rm = T)
+      return(C.dels.med)}))
+spli_C_MD$MD.AD <- round(spli_C_MD$MD.AD,digits = 0)
+spli_C_MD$MD.CRY <- round(spli_C_MD$MD.CRY,digits = 0)
+spli_C_MD$MS.id <- rownames(spli_C_MD)
+rownames(spli_C_MD) <- NULL
+```
+
+####MF-MD
+
+```{r SPLI_Coding_condition_MF_MD}
+spli_C_MF_MD <- merge(x = spli_C_MF,y = spli_C_MD,by = "MS.id")
+# MFMC
+spli_C_MF_MD[which(spli_C_MF_MD$MS.id %in% MFMC$V1),"category"] <- "MFMC"
+```
+
+###ES96
+
+####MF
+
+```{r SPLI_ES96_condition_MF_data_preparation}
+spli_ES96_DOS_sdf <- spli_TA985_mat[which(rownames(spli_TA985_mat) 
+                                          %in% spli_ES96_legend_DOS_sdf$MS.id),]
+# object transformation from double to character
+spli_ES96_DOS_sdf[is.na(spli_ES96_DOS_sdf)] <- "NA"
+# replace NA by "NA"
+spli_ES96_DOS_sdf[grepl("NA",spli_ES96_DOS_sdf)] <- NA
+# replace values /!\ KEEP NA /!\
+spli_ES96_DOS_sdf[grepl("[1-9]",spli_ES96_DOS_sdf)] <- "mutated"
+spli_ES96_DOS_sdf[grepl("0",spli_ES96_DOS_sdf)] <- "non-mutated"
+
+# list from ES96 deletion matrix, by condition
+spli_ES96_MF_all_sdf <- list(
+  spli_ES96_DOS_ADK = spli_ES96_DOS_sdf[,grepl("T",colnames(spli_ES96_DOS_sdf))],
+  spli_ES96_DOS_AD = spli_ES96_DOS_sdf[,grepl("AD",colnames(spli_ES96_DOS_sdf))],
+  spli_ES96_DOS_CRY = spli_ES96_DOS_sdf[,grepl("CRY",colnames(spli_ES96_DOS_sdf))])
+```
+
+```{r SPLI_ES96_condition_MF_function}
+# calculation of mutational frequency for each MS from ES96 & by condition
+ES96.MF.cond = function(ES96.DOS.mat){
+  # pre-create dataframe of MS.statut for each MS id & samples
+  ES96.MF.sdf <- data.frame(MS.id = NULL,MS.id.statut = NULL)
+  # list MS.statut for each MS id & samples
+  for(i in seq(1,nrow(ES96.DOS.mat))){
+    rep.rownames <- data.frame(rep(rownames(ES96.DOS.mat)[i],
+                                   times = ncol(ES96.DOS.mat)),
+                               ES96.DOS.mat[i,])
+    ES96.MF.sdf = rbind(ES96.MF.sdf,rep.rownames)}
+  colnames(ES96.MF.sdf) <- c("MS.id","MS.id.statut")
+  ES96.MF <- as.data.frame(table(ES96.MF.sdf$MS.id,
+                                 ES96.MF.sdf$MS.id.statut,
+                                 useNA = "ifany"))
+  colnames(ES96.MF) <- c("MS.id","MS.id.statut","MS.id.n")
+  # add sample size variables
+  ## standard
+  ES96.MF$N <- rep(ncol(ES96.DOS.mat),nrow(ES96.MF))
+  ## taking into account NA (not covered)
+  ES96.MF$N.na <-  gapply(ES96.MF,groups = ES96.MF$MS.id,FUN = function(MF.DOS){
+    MF.DOS$N.na <- NA
+    MF.DOS$N.na <- as.numeric(MF.DOS[is.na(MF.DOS$MS.id.statut),"MS.id.n"])
+    return(MF.DOS[3,"N.na"])})
+  ES96.MF$N.na <- ES96.MF$N - ES96.MF$N.na
+  # calculate frequencies
+  ES96.MF$MS.id.freq <- as.numeric(ES96.MF$MS.id.n / ES96.MF$N.na)
+  # add gene names
+  ES96.MF <- merge(x = ES96.MF,y = ES96,by = "MS.id")
+  # select only "mutated" MS in "MS.id.statut" variables
+  ES96.MF <- ES96.MF[which(ES96.MF$MS.id.statut %in% "mutated"),]
+  ES96.MF <- ES96.MF[order(ES96.MF$exon.id),]
+  ES96.MF <- ES96.MF[,c(7,1,10,3,5,6,8,9,11:15)]
+  return(ES96.MF)
+}
+```
+
+```{r SPLI_ES96_condition_MF}
+# input = list of matrix sorted by condition
+spli_ES96_MF_all_lst <- lapply(spli_ES96_MF_all_sdf,FUN = ES96.MF.cond)
+# regroup all in one df
+spli_ES96_MF_all <- cbind(spli_ES96_MF_all_lst$spli_ES96_DOS_ADK,
+                          spli_ES96_MF_all_lst$spli_ES96_DOS_AD[,c(4,5,6)],
+                          spli_ES96_MF_all_lst$spli_ES96_DOS_CRY[,c(4,5,6)])
+colnames(spli_ES96_MF_all)[c(4:6,14:19)] <- c("MS.id.n.ADK","N.na.ADK","MF.ADK",
+                                              "MS.id.n.AD","N.na.AD","MF.AD",
+                                              "MS.id.n.CRY","N.na.CRY","MF.CRY")
+# add N.na.all
+spli_ES96_MF_all$N.na.all <- spli_ES96_MF_all$N.na.ADK + spli_ES96_MF_all$N.na.AD +  spli_ES96_MF_all$N.na.CRY
+# add MS.n.all (number of mutated MS in all conditions)
+spli_ES96_MF_all$MS.n.all <- 
+  spli_ES96_MF_all$MS.id.n.ADK + spli_ES96_MF_all$MS.id.n.AD +
+  spli_ES96_MF_all$MS.id.n.CRY
+# add global MF (MF.all)
+spli_ES96_MF_all$MF.all <- spli_ES96_MF_all$MS.n.all / spli_ES96_MF_all$N.na.all
+# NaN = 0/0 => replace by NA 
+spli_ES96_MF_all[is.nan(spli_ES96_MF_all$MF.ADK),"MF.ADK"] <- NA
+spli_ES96_MF_all[is.nan(spli_ES96_MF_all$MF.AD),"MF.AD"] <- NA
+spli_ES96_MF_all[is.nan(spli_ES96_MF_all$MF.CRY),"MF.CRY"] <- NA
+# rounding
+spli_ES96_MF_all$MF.ADK <- round(spli_ES96_MF_all$MF.ADK,digits = 2)
+spli_ES96_MF_all$MF.AD <- round(spli_ES96_MF_all$MF.AD,digits = 2)
+spli_ES96_MF_all$MF.CRY <- round(spli_ES96_MF_all$MF.CRY,digits = 2)
+spli_ES96_MF_all$MF.all <- round(spli_ES96_MF_all$MF.all,digits = 2)
+
+# order columns
+spli_ES96_MF_all$category <- "ES96"
+colnames(spli_ES96_MF_all)[11] <- c("repeat.length")
+spli_ES96_MF_all <- spli_ES96_MF_all[,c(1:3,23,11,13,7,8,21,20,22,6,16,19,5,15,18)]
+# cut off N.na > 32 & MF.all >= 0.3
+spli_ES96_MF <- spli_ES96_MF_all[which(spli_ES96_MF_all$N.na.all > 32 & spli_ES96_MF_all$MF.all >= 0.3),]
+```
+
+####MD
+
+```{r SPLI_ES96_condition_MD}
+# MD = median of deletion (only for mutated MS from each condition) 
+spli_ES96_uni_mat_MD <- spli_TA985_mat[which(rownames(spli_TA985_mat)
+                                             %in% spli_ES96_MF_all$MS.id),]
+# replace not mutated (cf 0 values) by NA (excluded to median calculation)
+spli_ES96_uni_mat_MD[grepl("0",spli_ES96_uni_mat_MD)] <- NA
+# calculation of median of deletion (MD) for each MS from ES96 & by condition
+spli_ES96_MD_all <- data.frame(
+  MD.ADK = gapply(as.data.frame(
+    spli_ES96_uni_mat_MD[,grepl("T",colnames(spli_ES96_uni_mat_MD))]),
+    groups = rownames(spli_ES96_uni_mat_MD),FUN = function(ES96.dels){
+      ES96.dels.med <- median(as.numeric(ES96.dels),na.rm = T)
+      return(ES96.dels.med)}),
+  MD.AD = gapply(as.data.frame(
+    spli_ES96_uni_mat_MD[,grepl("AD",colnames(spli_ES96_uni_mat_MD))]),
+    groups = rownames(spli_ES96_uni_mat_MD),FUN = function(ES96.dels){
+      ES96.dels.med <- median(as.numeric(ES96.dels),na.rm = T)
+      return(ES96.dels.med)}),
+  MD.CRY = gapply(as.data.frame(
+    spli_ES96_uni_mat_MD[,grepl("CRY",colnames(spli_ES96_uni_mat_MD))]),
+    groups = rownames(spli_ES96_uni_mat_MD),FUN = function(ES96.dels){
+      ES96.dels.med <- median(as.numeric(ES96.dels),na.rm = T)
+      return(ES96.dels.med)}))
+spli_ES96_MD_all$MD.ADK <- round(spli_ES96_MD_all$MD.ADK,digits = 0)
+spli_ES96_MD_all$MD.AD <- round(spli_ES96_MD_all$MD.AD,digits = 0)
+spli_ES96_MD_all$MD.CRY <- round(spli_ES96_MD_all$MD.CRY,digits = 0)
+spli_ES96_MD_all$MS.id <- rownames(spli_ES96_MD_all)
+rownames(spli_ES96_MD_all) <- NULL
+
+# ES96 with cut off
+spli_ES96_MD <- spli_ES96_MD_all[which(spli_ES96_MD_all$MS.id %in% spli_ES96_MF$MS.id),]
+```
+
+####MF-MD
+
+```{r SPLI_ES96_condition_MF_MD}
+spli_ES96_MF_MD_all <- merge(x = spli_ES96_MF_all,y = spli_ES96_MD_all,by = "MS.id")
+# ES96 with cut off
+spli_ES96_MF_MD <- merge(x = spli_ES96_MF,y = spli_ES96_MD,by = "MS.id")
+```
+
+###ES96/C/MFMC
+
+```{r SPLI_ES96_C_MFMC_condition_MF_all_barplot}
+# all mutational frequency from all category (ES96, codding, MFMC)
+spli_ES96_C_MFMC_MF <- rbind(spli_ES96_MF_MD_all[,c(1,3:5,11:14,18:20)],
+                             spli_C_MF_MD[,c(1:4,7:10,14:16)])
+## remove factor
+spli_ES96_C_MFMC_MF$MS.id <- as.character(spli_ES96_C_MFMC_MF$MS.id)
+# supp table
+write.table(spli_ES96_C_MFMC_MF[order(spli_ES96_C_MFMC_MF$MF.CRY,decreasing = T),],file = "Supplementary.table.S4.csv",sep = ",",col.names = T,row.names = F)
+
+## Top 25% most frequently mutated genes (> 75th quantile) in early stage
+## keep only covered (NA = not covered)
+spli_ES96_C_MFMC_MF25 <- spli_ES96_C_MFMC_MF[!is.na(spli_ES96_C_MFMC_MF$MF.CRY),]
+spli_ES96_C_MFMC_MF25 <- spli_ES96_C_MFMC_MF25[which(spli_ES96_C_MFMC_MF25$MF.CRY >= quantile(spli_ES96_C_MFMC_MF25$MF.CRY,probs = 0.75)),]
+
+## order
+spli_ES96_C_MFMC_MF$MS.id <- 
+  factor(spli_ES96_C_MFMC_MF$MS.id,
+         levels = spli_ES96_C_MFMC_MF[order(spli_ES96_C_MFMC_MF$MF.CRY,
+                                            decreasing = T),"MS.id"])
+spli_ES96_C_MFMC_MF_plt <- spli_ES96_C_MFMC_MF
+spli_ES96_C_MFMC_MF_plt[which(spli_ES96_C_MFMC_MF_plt$MF.CRY == 0),"MF.CRY"] <- 0.001
+
+ggplot(spli_ES96_C_MFMC_MF_plt,aes(x = MS.id,y = MF.CRY,fill = category)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("ES96" = "#e6550dff","coding" = "#2b8cbeff",
+                               "MFMC" = "#2ca25f")) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1,size = 3))
+```
+
+```{r SPLI_ES96_C_MFMC_condition_MF_all_barplot_stat}
+chisq.test(matrix(c(33,94,22,129),2,2,byrow = T),correct = T)
+```
+
+##Potential Drivers
+
+###Legend
+
+```{r SPLI_ES96_Coding_top_gene_heatmap_legend}
+# add mutation.type, exon.type, variables ; lgd = legend
+spli_ES96_C_MFMC_MF25_lgd <- merge(x = spli_ES96_C_MFMC_MF25,
+                                   y = spli_ES96_legend_DOS_sdf[,c(1,8,9)],
+                                   by = "MS.id",all.x = T)
+spli_ES96_C_MFMC_MF25_lgd[is.na(spli_ES96_C_MFMC_MF25_lgd$mutation),"mutation"] <- "na"
+spli_ES96_C_MFMC_MF25_lgd[is.na(spli_ES96_C_MFMC_MF25_lgd$exon.type),"exon.type"] <- "na"
+# add expected protein variable
+ES96_exp <- read.csv(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/ES96.expectation.csv",header = T,sep = ",",stringsAsFactors = F)
+## exp.protein = expected protein
+spli_ES96_C_MFMC_MF25_lgd <- merge(x = spli_ES96_C_MFMC_MF25_lgd,y = ES96_exp[,c(1,13)],
+                                   by = "MS.id",all.x = T)
+spli_ES96_C_MFMC_MF25_lgd[is.na(spli_ES96_C_MFMC_MF25_lgd$exp.protein),"exp.protein"] <- "na"
+
+spli_ES96_C_MFMC_MF25_lgd <-
+  spli_ES96_C_MFMC_MF25_lgd[order(spli_ES96_C_MFMC_MF25_lgd$MS.id),]
+
+spli_ES96_C_MFMC_MF25_CRY50_lgd <- spli_ES96_C_MFMC_MF25_lgd[which(spli_ES96_C_MFMC_MF25_lgd$MF.CRY >= 0.5),]
+```
+
+###Matrix
+
+```{r SPLI_ES96_Coding_top_gene_heatmap_matrix}
+# POOL of ES96 & coding matrix
+spli_ES96_C_DOS_sdf <- rbind(spli_ES96_DOS_sdf,spli_C_DOS_sdf)
+# select Top 25% genes (MF25) & most frequent in the crypt (CRY50) MS.id (gene) in ES96-coding matrix mutated/non-mutated/NA
+spli_MF25_CRY50_DOS <- spli_ES96_C_DOS_sdf[which(rownames(spli_ES96_C_DOS_sdf) %in% spli_ES96_C_MFMC_MF25_CRY50_lgd$MS.id),]
+
+# manual column order
+spli_MF25_CRY50_DOS <- 
+  spli_MF25_CRY50_DOS[,c(1,5,14,15,2,12,18,7,10,22,11,6,3,4,13,9,16,17,8,19,20,21,64,45,
+                         34,31,49,44,43,53,29,42,39,26,56,38,32,51,62,58,36,46,33,41,30,
+                         23,50,55,24,52,60,25,67,54,48,59,63,57,28,37,40,58,47,65,66,68,
+                         61,35)]
+# row order
+tp_order <- as.data.frame(spli_MF25_CRY50_DOS)
+tp_order <- tp_order[order(rownames(tp_order)),]
+spli_MF25_CRY50_DOS <- as.matrix(tp_order)
+# matrix rowname rename
+rownames(spli_MF25_CRY50_DOS) <- spli_ES96_C_MFMC_MF25_CRY50_lgd$gene
+```
+
+###Plot
+
+```{r SPLI_ES96_Coding_top_gene_heatmap_plot}
+## colors
+# heatmap cell's
+MF25_DOS_colors <- c("mutated" = "#e6550dff","non-mutated" = "#ffffff")
+
+# row_ann
+MF25_DOS_row_colors <- list(
+  category = c("ES96" = "#e6550dff","coding" = "#2b8cbeff"),
+  # mutation.type = c("inframe" = "#35978f","frameshift" = "#c51b7d","na" = "#d9d9d9"),
+  exon.type = c("constitutive" = "#1a9850","alternative" = "#fdae61","na" = "#d9d9d9"),
+  # exp.protein = c("functionnal" = "#ff9e00ff","loss.function" = "#ffcc00ff",
+  #                 "na" = "#d9d9d9"),
+  MF.CRY = colorRamp2(c(0,0.25,0.5,0.75,1),brewer.pal(5,"Blues")),
+  MF.ADK = colorRamp2(c(0,0.25,0.5,0.75,1),brewer.pal(5,"Reds")))
+
+# columns_ann
+MF25_DOS_col_colors <- list(
+  MSICareScore = colorRamp2(c(40,50,60,70,80,90,100),brewer.pal(7,"RdPu")),
+  condition = c("1.CRY_A.mono" = "#e28b00ff","1.CRY_B.oligo" = "#e28b00ff",
+                "1.CRY_C.poly" = "#e28b00ff","2.AD" = "#796503ff","3.ADK" = "#962d00ff"))
+
+## annotations
+# rows
+MF25_DOS_row <- rowAnnotation(
+  category = spli_ES96_C_MFMC_MF25_CRY50_lgd$category,
+  # mutation = spli_ES96_C_MFMC_MF25_CRY50_lgd$mutation.type,
+  exon.type = spli_ES96_C_MFMC_MF25_CRY50_lgd$exon.type,
+  # protein.exp = spli_ES96_C_MFMC_MF25_CRY50_lgd$exp.protein,
+  MF.CRY = spli_ES96_C_MFMC_MF25_CRY50_lgd$MF.CRY,
+  MF.ADK = spli_ES96_C_MFMC_MF25_CRY50_lgd$MF.ADK,
+  col = MF25_DOS_row_colors,
+  simple_anno_size = unit(0.5,"cm"),
+  annotation_label = gt_render(c("","","","","","")))
+# columns
+MF25_DOS_col <- columnAnnotation(
+  MSICareScore = metadata_HT$pourcentage,
+  condition = metadata_HT$cond.HT,
+  col = MF25_DOS_col_colors,
+  simple_anno_size = unit(0.3,"cm"),
+  annotation_label = gt_render(c("","")))
+# order
+MF25_DOS_row_order <- order(spli_ES96_C_MFMC_MF25_CRY50_lgd$MF.CRY,decreasing = T)
+# col_order => manual
+
+Heatmap(spli_MF25_CRY50_DOS,
+        col = MF25_DOS_colors,na_col = "#969696",
+        row_order = MF25_DOS_row_order,
+        # column_order = ES96_MF50_DOS_col_order,
+        column_split = metadata_spli_HT$cond.HT,
+        right_annotation = MF25_DOS_row,
+        bottom_annotation = MF25_DOS_col,
+        show_column_names = F,
+        show_row_names = T,
+        row_names_gp = gpar(fontsize = 8),
+        rect_gp = gpar(col = "white"),
+        border = T)
+```
+
+##Pathway Analysis
+
+###Gene list
+
+####TA985
+
+```{r TA985_all_pathway_analysis_gene_list}
+TA985.all.gene <- TA985$gene
+TA985.all.gene <- unique(TA985.all.gene)
+```
+
+```{r TA985_all_alt_cst_pathway_analysis_gene_list}
+# alternative
+TA985.all.alt.gene <- TA985[which(TA985$exon.type == "alternative"),"gene"]
+TA985.all.alt.gene <- unique(TA985.all.alt.gene)
+# constitutive
+TA985.all.cst.gene <- TA985[which(TA985$exon.type == "constitutive"),"gene"]
+TA985.all.cst.gene <- unique(TA985.all.cst.gene)
+```
+
+####ES96
+
+```{r ES96_all_pathway_analysis_gene_list}
+ES96.all.gene <- ES96$gene
+ES96.all.gene <- unique(ES96.all.gene)
+```
+
+```{r SPLI_ES96_all_alt_cst_pathway_analysis_gene_list}
+# alternative
+ES96.all.alt.gene <- ES96[which(ES96$exon.type == "alternative"),"gene"]
+ES96.all.alt.gene <- unique(ES96.all.alt.gene)
+# constitutive
+ES96.all.cst.gene <- ES96[which(ES96$exon.type == "constitutive"),"gene"]
+ES96.all.cst.gene <- unique(ES96.all.cst.gene)
+```
+
+```{r SPLI_ES96_tumorigenesis_pathway_analysis_gene_list}
+# generate gene list with ES96 through tumorigenesis
+spli_ES96_gene <- list(
+  ADK_ES96 = unique(spli_ES96_MF_MD_all[which(spli_ES96_MF_MD_all$MF.ADK > 0),"gene"]),
+  AD_ES96 = unique(spli_ES96_MF_MD_all[which(spli_ES96_MF_MD_all$MF.AD > 0),"gene"]),
+  CRY_ES96 = unique(spli_ES96_MF_MD_all[which(spli_ES96_MF_MD_all$MF.CRY > 0),"gene"]))
+```
+
+####Coding
+
+#####all
+
+```{r SPLI_Coding_pathway_analysis_gene_list}
+## by samples
+spli_MSI.MS_C_gene <- lapply(spli_MSI.MS,FUN = function(MSI.MS.res){
+  MSI.MS.C <- MSI.MS.res[which(MSI.MS.res$region.category %in% "coding"),]
+  return(unique(MSI.MS.C$gene))})
+## regroup samples by condition
+spli_MSI.MS_C_gene <- lapply(
+  list(ADK_C = spli_MSI.MS_C_gene[grepl("T",names(spli_MSI.MS_C_gene))],
+       AD_C = spli_MSI.MS_C_gene[grepl("HGD",names(spli_MSI.MS_C_gene))],
+       CRY_C = spli_MSI.MS_C_gene[grepl("CRY",names(spli_MSI.MS_C_gene))]),
+  FUN = function(MSI.MS.gene){
+    return(Reduce(union,MSI.MS.gene))})
+# coding union all 
+spli.MSI.MS.C.all <- Reduce(union,spli_MSI.MS_C_gene)
+```
+
+#####C129 (cut off)
+
+```{r C129_all_pathway_analysis_gene_list}
+C129.all.gene <- spli_C_MF_MD$gene
+C129.all.gene <- unique(C129.all.gene)
+```
+
+```{r SPLI_C129_tumorigenesis_pathway_analysis_gene_list}
+# generate gene list with ES96 through tumorigenesis
+spli_C129_gene <- list(
+  ADK_C129 = unique(spli_C_MF_MD[which(spli_C_MF_MD$MF.ADK > 0),"gene"]),
+  AD_C129 = unique(spli_C_MF_MD[which(spli_C_MF_MD$MF.AD > 0),"gene"]),
+  CRY_C129 = unique(spli_C_MF_MD[which(spli_C_MF_MD$MF.CRY > 0),"gene"]))
+```
+
+####Top genes
+
+```{r SPLI_Top_genes_tumorigenesis_pathway_analysis_gene_list}
+spli_ES96_C_MFMC_MF_ADK <- spli_ES96_C_MFMC_MF[which(spli_ES96_C_MFMC_MF$MF.ADK >= 0.3),]
+spli_ES96_C_MFMC_MF_AD <- spli_ES96_C_MFMC_MF[which(spli_ES96_C_MFMC_MF$MF.AD >= 0.3),]
+spli_ES96_C_MFMC_MF_CRY <- spli_ES96_C_MFMC_MF25
+```
+
+####All
+
+```{r SPLI_all_pathway_analysis_gene_list}
+# PA = pathway analysis 
+spli_PA_all_gene <- list(
+  # coding all
+  C_all = spli.MSI.MS.C.all,
+  # TA985
+  TA985 = TA985.all.gene,TA985_alt = TA985.all.alt.gene,TA985_cst = TA985.all.cst.gene,
+  # TA985 + coding (ADK only)
+  TA985_C = union(TA985.all.gene,spli_MSI.MS_C_gene$ADK_C),
+  # ES96
+  ES96 = ES96.all.gene,
+  # ES96 in tumorigenesis
+  ADK_ES96 = spli_ES96_gene$ADK_ES96,AD_ES96 = spli_ES96_gene$AD_ES96,
+  CRY_ES96 = spli_ES96_gene$CRY_ES96,
+  # C129
+  C129 = C129.all.gene,
+  # C129 in tumorigenesis
+  ADK_C129 = spli_C129_gene$ADK_C129,AD_C129 = spli_C129_gene$AD_C129,
+  CRY_C129 = spli_C129_gene$CRY_C129,
+  # All(ES96 + C129), in tumorigenesis
+  ADK_C129_ES96 = union(spli_C129_gene$ADK_C129,spli_ES96_gene$ADK_ES96),
+  AD_C129_ES96 = union(spli_C129_gene$AD_C129,spli_ES96_gene$AD_ES96),
+  CRY_C129_ES96 = union(spli_C129_gene$CRY_C129,spli_ES96_gene$CRY_ES96),
+  # Top25(ES96 + C129), in tumorigenesis
+  ADK_Top25 = spli_ES96_C_MFMC_MF_ADK$gene,AD_Top25 = spli_ES96_C_MFMC_MF_AD$gene,
+  CRY_Top25 = spli_ES96_C_MFMC_MF_CRY$gene)
+
+# write.table (loop)
+for(i in seq(1,length(spli_PA_all_gene))) {
+  basename = names(spli_PA_all_gene)[i]
+  write.table(spli_PA_all_gene[[i]],
+              file = paste0(basename,".txt"),
+              sep = "\t",row.names = F,col.names = F)
+}
+```
+
+###EnrichR
+
+Go to the website EnrichR to do enrichment of genes in pathways. There is two library avaible for this analyze : GO-Biological Process, BioPlanet 2019 or KEGG. The output is a .txt files ; it is use next to annotation large groups of pathway & then for the analysis pathway's heatmap.
+
+####BioPlanet
+
+```{r SPLI_EnrichR_BioPlanet2019_listing}
+spli.BP19 <- list.files(path = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/2_Pathway_analysis/2_EnrichR/BioPlanet_2019/v9/",pattern = "*.txt")
+
+spli_BP19 <- lapply(paste0("~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/2_Pathway_analysis/2_EnrichR/BioPlanet_2019/v9/",spli.BP19),function(i){read.delim(i,header = T,sep = "\t",stringsAsFactors = F)})
+
+names(spli_BP19) <- spli.BP19
+names(spli_BP19) <- gsub("_BioPlanet_2019_table.txt","",names(spli_BP19))
+# names(spli_BP19) <- gsub("spli_PA_gene_","",names(spli_BP19))
+
+spli_BP19 <- lapply(spli_BP19,function(list.BP19){
+  list.BP19$nb <- as.numeric(unlist(lapply(strsplit(list.BP19$Overlap,"[/]"),`[[`,1)))
+  list.BP19$tot <- as.numeric(unlist(lapply(strsplit(list.BP19$Overlap,"[/]"),`[[`,2)))
+  list.BP19$ratio <- list.BP19$nb / list.BP19$tot
+   return(list.BP19)})
+spli_BP19 <- spli_BP19[c(9,17,16,19,18,15,13,3,7,10,11,1,5,12,2,6,14,4,8)]
+```
+
+#####pval
+
+```{r SPLI_BioPlanet2019_pval}
+# sort by pvalue < 0.05 & nb genes > 1
+spli_BP19_pval <- lapply(spli_BP19,function(list.BP19) {
+  list.BP19_pval <- list.BP19[which(list.BP19$P.value < 0.05 & list.BP19$nb > 1),]
+  return(list.BP19_pval)})
+
+# add group.path variable
+## list of all terms
+spli_BP19_uni <- data.frame(
+  Term = Reduce(union,lapply(spli_BP19_pval,FUN = function(list.BP19_pval){
+    return(list.BP19_pval$Term)})))
+## input list of pathway from BP19
+BP19_pathway_list <- read.csv(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/2_Pathway_analysis/3_Pathway/BioPlanet/BP19_pathway_list_v3.csv",sep = ",",header = T,stringsAsFactors = F)
+
+# add pathway & group.pathway variables
+spli_BP19_uni <- merge(x = spli_BP19_uni,y = BP19_pathway_list,by = "Term",all.x = T)
+
+write.table(spli_BP19_uni,file = "spli_BP19_uni.csv",sep = ",",col.names = T,row.names = F)
+```
+
+We had, manually, annotation for overall groups of pathway (ex: Immune system,Stress response, Signal transduction, Adhesion, etc.)
+
+```{r SPLI_BioPlanet2019_pval_Heatmap_preparation}
+# AG = all grouped but not sorted
+spli_BP19_uni_AG <- read.csv(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/2_Pathway_analysis/3_Pathway/BioPlanet/v9/spli_BP19_uni.csv",header = T,sep = ",",stringsAsFactors = F)
+## order
+spli_BP19_uni_AG <- 
+  spli_BP19_uni_AG[order(spli_BP19_uni_AG$group.path,spli_BP19_uni_AG$pathway),]
+
+# add "pathway" & "group of pathway" variable
+spli_BP19_AG <- lapply(spli_BP19_pval,function(BP19.pval){
+  BP19.merge <- merge(x = spli_BP19_uni_AG,y = BP19.pval[,c(1,3)],by = "Term",all.x = T)
+  BP19.merge[,4] <- -log10(BP19.merge[,4])
+  return(BP19.merge)})
+
+# matrix of BP19 pathway (mean pval)
+spli_BP19_AG_HT <- do.call(cbind,lapply(spli_BP19_AG,function(BP19){
+  # mean pval of each pathway
+  BP19.mean <- as.data.frame(gapply(BP19,groups = factor(BP19$pathway),FUN = function(x){
+    x.mean <- mean(x$P.value,na.rm = T)
+    return(x.mean)}))
+  return(BP19.mean)}))
+
+colnames(spli_BP19_AG_HT) <- names(spli_BP19_AG)
+
+# NA = 0
+spli_BP19_AG_HT[is.na(spli_BP19_AG_HT)] <- 0
+```
+
+#####padj
+
+```{r SPLI_BioPlanet2019_padj}
+# sort by padj < 0.05 & nb genes > 1
+spli_BP19_padj <- lapply(spli_BP19,function(list.BP19) {
+  list.BP19_adj <- list.BP19[which(list.BP19$Adjusted.P.value < 0.05),]
+  return(list.BP19_adj)})
+
+# add group.path variable
+## list of all terms
+spli_BP19_padj_uni <- data.frame(
+  Term = Reduce(union,lapply(spli_BP19_padj,FUN = function(list.BP19_adj){
+    return(list.BP19_adj$Term)})))
+## input list of pathway from BP19
+BP19_pathway_list <- read.csv(file = "~/Bureau/Thèse Hugo MONTEMONT/3_RStudio/Splicing/RESULTS/2_Pathway_analysis/3_Pathway/BioPlanet/BP19_pathway_list_v3.csv",sep = ",",header = T,stringsAsFactors = F)
+
+# add pathway & group.pathway variables
+spli_BP19_padj_uni <- merge(x = spli_BP19_padj_uni,y = BP19_pathway_list,by = "Term",all.x = T)
+
+write.table(spli_BP19_uni,file = "spli_BP19_uni.csv",sep = ",",col.names = T,row.names = F)
+```
+
+```{r SPLI_BioPlanet2019_padj_Heatmap_preparation}
+# AG = all grouped but not sorted
+spli_BP19_adj_uni_AG <- spli_BP19_padj_uni
+## order
+spli_BP19_adj_uni_AG <- 
+  spli_BP19_adj_uni_AG[order(spli_BP19_adj_uni_AG$group.path,spli_BP19_adj_uni_AG$pathway),]
+
+# add "pathway" & "group of pathway" variable
+spli_BP19_adj_AG <- lapply(spli_BP19_padj,function(BP19.padj){
+  BP19.merge <- merge(x = spli_BP19_adj_uni_AG,y = BP19.padj[,c(1,4)],by = "Term",all.x = T)
+  BP19.merge[,4] <- -log10(BP19.merge[,4])
+  return(BP19.merge)})
+
+# matrix of BP19 pathway (mean padj)
+spli_BP19_adj_AG_HT <- do.call(cbind,lapply(spli_BP19_adj_AG,function(BP19){
+  # mean pval of each pathway
+  BP19.mean <- as.data.frame(gapply(BP19,groups = factor(BP19$pathway),FUN = function(x){
+    x.mean <- mean(x$Adjusted.P.value,na.rm = T)
+    return(x.mean)}))
+  return(BP19.mean)}))
+
+colnames(spli_BP19_adj_AG_HT) <- names(spli_BP19_adj_AG)
+
+# NA = 0
+spli_BP19_adj_AG_HT[is.na(spli_BP19_adj_AG_HT)] <- 0
+```
+
+###Heatmap
+
+####BioPlanet
+
+#####pval
+
+```{r SPLI_BioPlanet2019_pval_Heatmap_sorted}
+# create df to split heatmap correctly (because of factor, it is not possible to do it correctly from input df "early_C.TA985m_KEGG_uni_AG")
+## matrix to df
+spli_BP19_AG_HT <- as.data.frame(spli_BP19_AG_HT)
+spli_BP19_AG_HT$pathway <- rownames(spli_BP19_AG_HT)
+## add "Group" variable
+spli_BP19_AG_HT <- 
+  merge(x = spli_BP19_AG_HT,y = unique(spli_BP19_uni_AG[,c(2,3)]),by = "pathway")
+## order
+spli_BP19_AG_HT <-
+  unique(spli_BP19_AG_HT[order(spli_BP19_AG_HT$group.path,spli_BP19_AG_HT$pathway),])
+## heatmap row split
+BP19_A_row_split <- spli_BP19_AG_HT
+## df to matrix (=> still a df, without string values) 
+rownames(spli_BP19_AG_HT) <- spli_BP19_AG_HT$pathway
+spli_BP19_AG_HT <- spli_BP19_AG_HT[,-c(1,21)]
+
+## heatmap cell colors
+BP19_colors <- colorRamp2(c(0,1,2,3), c("white","yellow","orange","red"))
+# order by groups of pathway ; S = sorted
+BP19_A_row_order <- unique(spli_BP19_uni_AG[order(spli_BP19_uni_AG$group.path,
+                                                  spli_BP19_uni_AG$pathway),"pathway"])
+
+Heatmap(spli_BP19_AG_HT,
+        col = BP19_colors,
+        row_order = BP19_A_row_order,
+        row_split = BP19_A_row_split$group.path,
+        row_title_gp = gpar(fontsize = 6),
+        row_gap = unit(1, "mm"),
+        show_column_names = T,
+        show_row_names = T,
+        cluster_columns = F,
+        cluster_rows = F,
+        column_names_gp = gpar(fontsize = 5),
+        row_names_gp = gpar(fontsize = 2), #6.5 for pdf ; 7
+        border = T,
+        heatmap_width = unit(15,"cm"),heatmap_height = unit(15,"cm"))
+```
+
+#####padj
+
+```{r SPLI_BioPlanet2019_pval_Heatmap_sorted}
+# create df to split heatmap correctly (because of factor, it is not possible to do it correctly from input df "early_C.TA985m_KEGG_uni_AG")
+## matrix to df
+spli_BP19_adj_AG_HT <- as.data.frame(spli_BP19_adj_AG_HT)
+spli_BP19_adj_AG_HT$pathway <- rownames(spli_BP19_adj_AG_HT)
+## add "Group" variable
+spli_BP19_adj_AG_HT <- 
+  merge(x = spli_BP19_adj_AG_HT,y = unique(spli_BP19_adj_uni_AG[,c(2,3)]),by = "pathway")
+## order
+spli_BP19_adj_AG_HT <-
+  unique(spli_BP19_adj_AG_HT[order(spli_BP19_adj_AG_HT$group.path,spli_BP19_adj_AG_HT$pathway),])
+## heatmap row split
+BP19_A_row_split <- spli_BP19_adj_AG_HT
+## df to matrix (=> still a df, without string values) 
+rownames(spli_BP19_adj_AG_HT) <- spli_BP19_adj_AG_HT$pathway
+spli_BP19_adj_AG_HT <- spli_BP19_adj_AG_HT[,-c(1,21)]
+
+## heatmap cell colors
+BP19_colors <- colorRamp2(c(0,1,2,3), c("white","yellow","orange","red"))
+# order by groups of pathway ; S = sorted
+BP19_A_row_order <- unique(spli_BP19_adj_uni_AG[order(spli_BP19_adj_uni_AG$group.path,
+                                                      spli_BP19_adj_uni_AG$pathway),"pathway"])
+
+Heatmap(spli_BP19_adj_AG_HT,
+        col = BP19_colors,
+        row_order = BP19_A_row_order,
+        row_split = BP19_A_row_split$group.path,
+        row_title_gp = gpar(fontsize = 6),
+        row_gap = unit(1, "mm"),
+        show_column_names = T,
+        show_row_names = T,
+        cluster_columns = F,
+        cluster_rows = F,
+        column_names_gp = gpar(fontsize = 5),
+        row_names_gp = gpar(fontsize = 2), #6.5 for pdf ; 7
+        border = T,
+        heatmap_width = unit(15,"cm"),heatmap_height = unit(15,"cm"))
+```
