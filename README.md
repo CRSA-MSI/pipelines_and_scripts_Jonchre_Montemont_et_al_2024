@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/819825849.svg)](https://zenodo.org/doi/10.5281/zenodo.12705899)
+
 # Pipelines and scripts Jonchere Montemont et al
 
 This repository comprise two folders containig part of the pipelines and scripts used to do the analysis in the article Massive Early Perturbation of Alternative Splicing Partly Due to Microsatellite Instability at U2AF-Binding Polypyrimidic Tract Sites During Initiation of Colorectal Cancer.
